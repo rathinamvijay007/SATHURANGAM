@@ -1,0 +1,71 @@
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id           String        @id @default(uuid())
+  username     String        @unique
+  email        String        @unique
+  passwordHash String
+  rating       Int           @default(1200)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  
+  // Games played
+  whiteGames   Game[]        @relation("WhitePlayer")
+  blackGames   Game[]        @relation("BlackPlayer")
+  
+  // Chat messages
+  messages     ChatMessage[]
+}
+
+model Game {
+  id              String        @id @default(uuid())
+  whitePlayerId   String
+  blackPlayerId   String
+  status          String        // "WAITING", "IN_PROGRESS", "WHITE_WON", "BLACK_WON", "DRAW"
+  outcome         String?       // "CHECKMATE", "RESIGNATION", "TIMEOUT", "STALEMATE", "DRAW_AGREEMENT", "INSUFFICIENT_MATERIAL", "FIFTY_MOVES", "THREEFOLD_REPETITION"
+  fen             String        // Current FEN string (default: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+  pgn             String        @default("") // Moves history in PGN format
+  timeControl     String        // e.g. "3+2", "5+0", "10+0", "1+0"
+  whiteTimeLeftMs Int
+  blackTimeLeftMs Int
+  lastMoveAt      DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  whitePlayer    User          @relation("WhitePlayer", fields: [whitePlayerId], references: [id])
+  blackPlayer    User          @relation("BlackPlayer", fields: [blackPlayerId], references: [id])
+  
+  moves          Move[]
+  messages       ChatMessage[]
+}
+
+model Move {
+  id          String   @id @default(uuid())
+  gameId      String
+  moveNumber  Int
+  playerColor String   // "W" or "B"
+  notation    String   // e.g. "e4"
+  fenAfter    String   // FEN string after this move
+  timeLeftMs  Int      // Time remaining for the moving player after this move
+  createdAt   DateTime @default(now())
+
+  game        Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+}
+
+model ChatMessage {
+  id        String   @id @default(uuid())
+  gameId    String
+  senderId  String
+  content   String
+  createdAt DateTime @default(now())
+
+  game      Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  sender    User     @relation(fields: [senderId], references: [id], onDelete: Cascade)
+}
