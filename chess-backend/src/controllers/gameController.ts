@@ -56,7 +56,11 @@ export const getGameHistory = asyncHandler(async (req: AuthenticatedRequest, res
 // GET /api/games/:id  — detailed game by ID
 // ─────────────────────────────────────────────────────────────────────────────
 export const getGameDetails = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+<<<<<<< HEAD
   const id = req.params.id as string;
+=======
+  const { id } = req.params;
+>>>>>>> a18fa7a5a2a380c797b998098cba9a4827c3c1c5
 
   const game = await prisma.game.findUnique({
     where: { id },
@@ -112,7 +116,11 @@ export const createGame = asyncHandler(async (req: Request, res: Response): Prom
 // PUT /api/games/:id  — update game metadata (admin)
 // ─────────────────────────────────────────────────────────────────────────────
 export const updateGame = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+<<<<<<< HEAD
   const id = req.params.id as string;
+=======
+  const { id } = req.params;
+>>>>>>> a18fa7a5a2a380c797b998098cba9a4827c3c1c5
 
   const existing = await prisma.game.findUnique({ where: { id }, select: { id: true } });
   if (!existing) throw new NotFoundError("Game");
@@ -139,7 +147,11 @@ export const updateGame = asyncHandler(async (req: Request, res: Response): Prom
 // DELETE /api/games/:id  — delete game (admin only)
 // ─────────────────────────────────────────────────────────────────────────────
 export const deleteGame = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+<<<<<<< HEAD
   const id = req.params.id as string;
+=======
+  const { id } = req.params;
+>>>>>>> a18fa7a5a2a380c797b998098cba9a4827c3c1c5
 
   const existing = await prisma.game.findUnique({ where: { id }, select: { id: true } });
   if (!existing) throw new NotFoundError("Game");
@@ -154,7 +166,11 @@ export const deleteGame = asyncHandler(async (req: Request, res: Response): Prom
 // POST /api/games/:id/move  — make a chess move
 // ─────────────────────────────────────────────────────────────────────────────
 export const makeMove = asyncHandler(async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+<<<<<<< HEAD
   const id = req.params.id as string;
+=======
+  const { id } = req.params;
+>>>>>>> a18fa7a5a2a380c797b998098cba9a4827c3c1c5
   const { from, to, promotion } = req.body as MakeMoveInput;
   const userId = req.user!.userId;
 
@@ -185,7 +201,11 @@ export const makeMove = asyncHandler(async (req: AuthenticatedRequest, res: Resp
 // POST /api/games/:id/resign  — resign the game
 // ─────────────────────────────────────────────────────────────────────────────
 export const resignGame = asyncHandler(async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+<<<<<<< HEAD
   const id = req.params.id as string;
+=======
+  const { id } = req.params;
+>>>>>>> a18fa7a5a2a380c797b998098cba9a4827c3c1c5
   const userId = req.user!.userId;
 
   const game = await prisma.game.findUnique({
@@ -217,7 +237,11 @@ export const resignGame = asyncHandler(async (req: AuthenticatedRequest, res: Re
 // POST /api/games/:id/draw  — offer / accept / decline draw
 // ─────────────────────────────────────────────────────────────────────────────
 export const handleDraw = asyncHandler(async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+<<<<<<< HEAD
   const id = req.params.id as string;
+=======
+  const { id } = req.params;
+>>>>>>> a18fa7a5a2a380c797b998098cba9a4827c3c1c5
   const { action } = req.body as DrawActionInput;
   const userId = req.user!.userId;
 
@@ -267,7 +291,11 @@ export const handleDraw = asyncHandler(async (req: AuthenticatedRequest, res: Re
 // POST /api/games/:id/finish  — force finish a game (admin or server)
 // ─────────────────────────────────────────────────────────────────────────────
 export const finishGame = asyncHandler(async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+<<<<<<< HEAD
   const id = req.params.id as string;
+=======
+  const { id } = req.params;
+>>>>>>> a18fa7a5a2a380c797b998098cba9a4827c3c1c5
   const { status, outcome, winnerId } = req.body as {
     status: string;
     outcome: string;

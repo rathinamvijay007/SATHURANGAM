@@ -18,6 +18,7 @@ export const updateProfileSchema = z.object({
 export const changePasswordSchema = z
   .object({
     currentPassword: z
+<<<<<<< HEAD
       .string()
       .min(1, "Current password is required"),
     newPassword: z
@@ -26,6 +27,16 @@ export const changePasswordSchema = z
       .max(72, "New password must be at most 72 characters"),
     confirmPassword: z
       .string()
+=======
+      .string({ required_error: "Current password is required" })
+      .min(1, "Current password is required"),
+    newPassword: z
+      .string({ required_error: "New password is required" })
+      .min(8, "New password must be at least 8 characters")
+      .max(72, "New password must be at most 72 characters"),
+    confirmPassword: z
+      .string({ required_error: "Confirm password is required" })
+>>>>>>> a18fa7a5a2a380c797b998098cba9a4827c3c1c5
       .min(1, "Confirm password is required"),
   })
   .refine((data) => data.newPassword === data.confirmPassword, {
