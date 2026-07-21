@@ -1,118 +1,185 @@
 import { Request, Response } from "express";
 import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
 import { prisma } from "../config/db";
+import { ApiResponse } from "../utils/ApiResponse";
+import { asyncHandler } from "../utils/asyncHandler";
+import { logger } from "../utils/logger";
+import {
+  ConflictError,
+  NotFoundError,
+  UnauthorizedError,
+} from "../errors/AppError";
+import {
+  signAccessToken,
+  signRefreshToken,
+  verifyRefreshToken,
+  AuthenticatedRequest,
+} from "../middleware/authMiddleware";
+import { RegisterInput, LoginInput, RefreshTokenInput } from "../validators/authValidator";
 
-const JWT_SECRET = process.env.JWT_SECRET || "super-secret-chess-key-2026";
-
-export const register = async (req: Request, res: Response): Promise<void> => {
-  try {
-    const { username, email, password } = req.body;
-
-    if (!username || !email || !password) {
-      res.status(400).json({ error: "Username, email, and password are required" });
-      return;
-    }
-
-    if (username.length < 3) {
-      res.status(400).json({ error: "Username must be at least 3 characters long" });
-      return;
-    }
-
-    if (password.length < 6) {
-      res.status(400).json({ error: "Password must be at least 6 characters long" });
-      return;
-    }
-
-    // Check if user exists
-    const existingUser = await prisma.user.findFirst({
-      where: {
-        OR: [{ username }, { email }],
-      },
-    });
-
-    if (existingUser) {
-      res.status(400).json({ error: "Username or email is already taken" });
-      return;
-    }
-
-    // Hash password
-    const salt = await bcrypt.genSalt(10);
-    const passwordHash = await bcrypt.hash(password, salt);
-
-    // Create user
-    const newUser = await prisma.user.create({
-      data: {
-        username,
-        email,
-        passwordHash,
-      },
-      select: {
-        id: true,
-        username: true,
-        email: true,
-        rating: true,
-        createdAt: true,
-      },
-    });
-
-    // Generate JWT
-    const token = jwt.sign({ userId: newUser.id }, JWT_SECRET, { expiresIn: "7d" });
-
-    res.status(201).json({
-      message: "User registered successfully",
-      token,
-      user: newUser,
-    });
-  } catch (error) {
-    console.error("Register error:", error);
-    res.status(500).json({ error: "Internal server error" });
-  }
+// Safe user projection — never expose passwordHash or refreshTokenHash
+const SAFE_USER_SELECT = {
+  id: true,
+  username: true,
+  email: true,
+  role: true,
+  avatar: true,
+  rating: true,
+  wins: true,
+  losses: true,
+  draws: true,
+  createdAt: true,
 };
 
-export const login = async (req: Request, res: Response): Promise<void> => {
-  try {
-    const { loginId, password } = req.body; // loginId can be email or username
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/auth/register
+// ─────────────────────────────────────────────────────────────────────────────
+export const register = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+  const { username, email, password } = req.body as RegisterInput;
 
-    if (!loginId || !password) {
-      res.status(400).json({ error: "Username/Email and password are required" });
-      return;
-    }
+  const existingUser = await prisma.user.findFirst({
+    where: { OR: [{ username }, { email }] },
+    select: { username: true, email: true },
+  });
 
-    // Find user
-    const user = await prisma.user.findFirst({
-      where: {
-        OR: [{ email: loginId }, { username: loginId }],
-      },
-    });
-
-    if (!user) {
-      res.status(400).json({ error: "Invalid credentials" });
-      return;
-    }
-
-    // Compare passwords
-    const isMatch = await bcrypt.compare(password, user.passwordHash);
-    if (!isMatch) {
-      res.status(400).json({ error: "Invalid credentials" });
-      return;
-    }
-
-    // Generate JWT
-    const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: "7d" });
-
-    res.status(200).json({
-      message: "Logged in successfully",
-      token,
-      user: {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        rating: user.rating,
-      },
-    });
-  } catch (error) {
-    console.error("Login error:", error);
-    res.status(500).json({ error: "Internal server error" });
+  if (existingUser) {
+    const field = existingUser.username === username ? "Username" : "Email";
+    throw new ConflictError(`${field} is already taken`);
   }
-};
+
+  const passwordHash = await bcrypt.hash(password, 12);
+
+  const newUser = await prisma.user.create({
+    data: { username, email, passwordHash },
+    select: SAFE_USER_SELECT,
+  });
+
+  const accessToken = signAccessToken(newUser.id, newUser.role);
+  const refreshToken = signRefreshToken(newUser.id, newUser.role);
+  const refreshTokenHash = await bcrypt.hash(refreshToken, 10);
+
+  await prisma.user.update({
+    where: { id: newUser.id },
+    data: { refreshTokenHash },
+  });
+
+  logger.info(`New user registered: ${username}`);
+
+  ApiResponse.success(res, { user: newUser, accessToken, refreshToken }, "User registered successfully", 201);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/auth/login
+// ─────────────────────────────────────────────────────────────────────────────
+export const login = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+  const { loginId, password } = req.body as LoginInput;
+
+  const user = await prisma.user.findFirst({
+    where: { OR: [{ email: loginId }, { username: loginId }] },
+  });
+
+  // Use constant-time comparison to prevent timing attacks
+  if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
+    logger.warn(`Failed login attempt for identifier: ${loginId}`);
+    throw new UnauthorizedError("Invalid credentials");
+  }
+
+  const accessToken = signAccessToken(user.id, user.role);
+  const refreshToken = signRefreshToken(user.id, user.role);
+  const refreshTokenHash = await bcrypt.hash(refreshToken, 10);
+
+  await prisma.user.update({
+    where: { id: user.id },
+    data: { refreshTokenHash, lastLoginAt: new Date() },
+  });
+
+  logger.info(`User logged in: ${user.username}`);
+
+  const safeUser = {
+    id: user.id,
+    username: user.username,
+    email: user.email,
+    role: user.role,
+    avatar: user.avatar,
+    rating: user.rating,
+    wins: user.wins,
+    losses: user.losses,
+    draws: user.draws,
+    createdAt: user.createdAt,
+  };
+
+  ApiResponse.success(res, { user: safeUser, accessToken, refreshToken }, "Logged in successfully");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/auth/refresh
+// ─────────────────────────────────────────────────────────────────────────────
+export const refreshToken = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+  const { refreshToken: token } = req.body as RefreshTokenInput;
+
+  let payload: { userId: string; role: string };
+  try {
+    payload = verifyRefreshToken(token);
+  } catch {
+    throw new UnauthorizedError("Invalid or expired refresh token");
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { id: payload.userId },
+    select: { id: true, role: true, refreshTokenHash: true },
+  });
+
+  if (!user || !user.refreshTokenHash) {
+    throw new UnauthorizedError("Invalid refresh token");
+  }
+
+  const isValid = await bcrypt.compare(token, user.refreshTokenHash);
+  if (!isValid) {
+    // Possible token reuse attack — invalidate stored token
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { refreshTokenHash: null },
+    });
+    logger.warn(`Refresh token reuse detected for userId: ${user.id}`);
+    throw new UnauthorizedError("Refresh token has already been used");
+  }
+
+  // Rotate: issue a new pair
+  const newAccessToken = signAccessToken(user.id, user.role);
+  const newRefreshToken = signRefreshToken(user.id, user.role);
+  const newHash = await bcrypt.hash(newRefreshToken, 10);
+
+  await prisma.user.update({
+    where: { id: user.id },
+    data: { refreshTokenHash: newHash },
+  });
+
+  ApiResponse.success(res, { accessToken: newAccessToken, refreshToken: newRefreshToken }, "Tokens refreshed");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/auth/logout
+// ─────────────────────────────────────────────────────────────────────────────
+export const logout = asyncHandler(async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  await prisma.user.update({
+    where: { id: req.user!.userId },
+    data: { refreshTokenHash: null },
+  });
+
+  logger.info(`User logged out: ${req.user!.userId}`);
+  ApiResponse.success(res, null, "Logged out successfully");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/auth/me
+// ─────────────────────────────────────────────────────────────────────────────
+export const getMe = asyncHandler(async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  const user = await prisma.user.findUnique({
+    where: { id: req.user!.userId },
+    select: SAFE_USER_SELECT,
+  });
+
+  if (!user) throw new NotFoundError("User");
+
+  ApiResponse.success(res, { user }, "Profile retrieved successfully");
+});
