@@ -12,25 +12,11 @@ export const createGameSchema = z.object({
 
 export const makeMoveSchema = z.object({
   from: z
-<<<<<<< HEAD
-    .string()
+    .string({ error: "From square is required" })
     .length(2, "From square must be exactly 2 characters (e.g. 'e2')")
     .regex(/^[a-h][1-8]$/, "From square must be a valid chess square (e.g. 'e2')"),
   to: z
-    .string()
-    .length(2, "To square must be exactly 2 characters (e.g. 'e4')")
-    .regex(/^[a-h][1-8]$/, "To square must be a valid chess square (e.g. 'e4')"),
-  promotion: z.enum(["q", "r", "b", "n"]).optional(),
-});
-
-export const drawActionSchema = z.object({
-  action: z.enum(["offer", "accept", "decline"]),
-=======
-    .string({ required_error: "From square is required" })
-    .length(2, "From square must be exactly 2 characters (e.g. 'e2')")
-    .regex(/^[a-h][1-8]$/, "From square must be a valid chess square (e.g. 'e2')"),
-  to: z
-    .string({ required_error: "To square is required" })
+    .string({ error: "To square is required" })
     .length(2, "To square must be exactly 2 characters (e.g. 'e4')")
     .regex(/^[a-h][1-8]$/, "To square must be a valid chess square (e.g. 'e4')"),
   promotion: z.enum(["q", "r", "b", "n"], { message: "Promotion must be q, r, b, or n" }).optional(),
@@ -38,10 +24,8 @@ export const drawActionSchema = z.object({
 
 export const drawActionSchema = z.object({
   action: z.enum(["offer", "accept", "decline"], {
-    required_error: "Action is required",
-    invalid_type_error: "Action must be 'offer', 'accept', or 'decline'",
+    error: "Action must be 'offer', 'accept', or 'decline'",
   }),
->>>>>>> a18fa7a5a2a380c797b998098cba9a4827c3c1c5
 });
 
 export const gameIdParamSchema = z.object({

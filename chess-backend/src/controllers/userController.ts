@@ -124,11 +124,7 @@ export const getLeaderboard = asyncHandler(async (req: Request, res: Response): 
 // GET /api/users/:id/stats
 // ─────────────────────────────────────────────────────────────────────────────
 export const getStats = asyncHandler(async (req: Request, res: Response): Promise<void> => {
-<<<<<<< HEAD
   const id = req.params.id as string;
-=======
-  const { id } = req.params;
->>>>>>> a18fa7a5a2a380c797b998098cba9a4827c3c1c5
 
   const user = await prisma.user.findUnique({
     where: { id },
@@ -159,11 +155,7 @@ export const getStats = asyncHandler(async (req: Request, res: Response): Promis
 // GET /api/users/:id/matches
 // ─────────────────────────────────────────────────────────────────────────────
 export const getMatchHistory = asyncHandler(async (req: Request, res: Response): Promise<void> => {
-<<<<<<< HEAD
   const id = req.params.id as string;
-=======
-  const { id } = req.params;
->>>>>>> a18fa7a5a2a380c797b998098cba9a4827c3c1c5
   const page = Math.max(1, Number(req.query.page) || 1);
   const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 10));
   const skip = (page - 1) * limit;
