@@ -1,7 +1,8 @@
-// Chess AI Engine (Minimax with Alpha-Beta Pruning & Piece-Square Tables)
+// Chess AI Engine — Minimax with Alpha-Beta Pruning & Piece-Square Tables
+// Compatible with chess.js v1.x API
 
-// Piece weights for evaluation
-const PIECE_VALUES = {
+// ─── Piece weights ────────────────────────────────────────────────────────────
+export const PIECE_VALUES = {
   p: 100,
   n: 320,
   b: 330,
@@ -10,8 +11,7 @@ const PIECE_VALUES = {
   k: 20000
 };
 
-// Piece-Square Tables (PST) to guide positional play
-// These tables are written from White's perspective (index 0 is a8, index 63 is h1)
+// ─── Piece-Square Tables (from White's perspective) ───────────────────────────
 const PAWN_PST = [
   [0,  0,  0,  0,  0,  0,  0,  0],
   [50, 50, 50, 50, 50, 50, 50, 50],
@@ -67,7 +67,6 @@ const QUEEN_PST = [
   [-20,-10,-10, -5, -5,-10,-10,-20]
 ];
 
-// King Middle Game PST
 const KING_MID_PST = [
   [-30,-40,-40,-50,-50,-40,-40,-30],
   [-30,-40,-40,-50,-50,-40,-40,-30],
@@ -79,7 +78,6 @@ const KING_MID_PST = [
   [20, 30, 10,  0,  0, 10, 30, 20]
 ];
 
-// King End Game PST
 const KING_END_PST = [
   [-50,-40,-30,-20,-20,-30,-40,-50],
   [-30,-20,-10,  0,  0,-10,-20,-30],
@@ -91,7 +89,6 @@ const KING_END_PST = [
   [-50,-30,-30,-30,-30,-30,-30,-50]
 ];
 
-// Flat 1D arrays of the PSTs for fast indexing
 const pstMap = {
   p: PAWN_PST.flat(),
   n: KNIGHT_PST.flat(),
@@ -102,36 +99,37 @@ const pstMap = {
   k_end: KING_END_PST.flat()
 };
 
-// Help map board index to 0-63 row-major format
-// chess.js squares are represented as 'a1', 'b1', ...
-function getSquareIndex(square) {
-  const file = square.charCodeAt(0) - 97; // 'a' -> 0, 'h' -> 7
-  const rank = 8 - parseInt(square.charAt(1)); // '8' -> 0, '1' -> 7
-  return rank * 8 + file;
+// ─── chess.js v1.x compatible helper wrappers ─────────────────────────────────
+
+/** Returns true if the game is in checkmate (chess.js v1.x API) */
+function isCheckmateState(g) {
+  return typeof g.isCheckmate === 'function' ? g.isCheckmate() : false;
 }
 
-// Check if endgame state (both queens gone, or one queen gone and remaining side has <= 1 minor piece)
-function isEndgame(chessInstance) {
-  let whitePieces = 0;
-  let blackPieces = 0;
-  let whiteQueen = false;
-  let blackQueen = false;
+/** Returns true if the game is a draw of any kind (chess.js v1.x API) */
+function isDrawState(g) {
+  if (typeof g.isDraw === 'function') return g.isDraw();
+  // Fallback — chess.js may expose individual checks
+  return (
+    (typeof g.isStalemate === 'function' && g.isStalemate()) ||
+    (typeof g.isThreefoldRepetition === 'function' && g.isThreefoldRepetition()) ||
+    (typeof g.isInsufficientMaterial === 'function' && g.isInsufficientMaterial())
+  );
+}
 
-  const board = chessInstance.board();
-  for (let r = 0; r < 8; r++) {
-    for (let c = 0; c < 8; c++) {
-      const piece = board[r][c];
-      if (piece) {
-        if (piece.type === 'q') {
-          if (piece.color === 'w') whiteQueen = true;
-          else blackQueen = true;
-        } else if (piece.type !== 'k') {
-          if (piece.color === 'w') whitePieces++;
-          else blackPieces++;
-        }
-      }
+// ─── Endgame detector ─────────────────────────────────────────────────────────
+function isEndgame(g) {
+  let whitePieces = 0, blackPieces = 0;
+  let whiteQueen = false, blackQueen = false;
+
+  g.board().forEach(row => row.forEach(piece => {
+    if (!piece) return;
+    if (piece.type === 'q') {
+      piece.color === 'w' ? (whiteQueen = true) : (blackQueen = true);
+    } else if (piece.type !== 'k') {
+      piece.color === 'w' ? whitePieces++ : blackPieces++;
     }
-  }
+  }));
 
   if (!whiteQueen && !blackQueen) return true;
   if (whiteQueen && whitePieces <= 1) return true;
@@ -139,131 +137,83 @@ function isEndgame(chessInstance) {
   return false;
 }
 
-// Evaluate board from white's perspective
-export function evaluateBoard(chessInstance, personality = 'standard') {
+// ─── Board Evaluation (from White's perspective) ──────────────────────────────
+export function evaluateBoard(g, personality = 'standard') {
+  if (isDrawState(g)) return 0;
+
   let score = 0;
-  const board = chessInstance.board();
-  const endgame = isEndgame(chessInstance);
+  const endgame = isEndgame(g);
 
-  for (let r = 0; r < 8; r++) {
-    for (let c = 0; c < 8; c++) {
-      const piece = board[r][c];
-      if (piece) {
-        let val = PIECE_VALUES[piece.type];
-        const isWhite = piece.color === 'w';
-        const index = r * 8 + c;
-        
-        // Flip row index for black
-        const pstIndex = isWhite ? index : ((7 - r) * 8 + c);
-        
-        // Get PST value
-        let pstVal = 0;
-        if (piece.type === 'k') {
-          pstVal = endgame ? pstMap.k_end[pstIndex] : pstMap.k_mid[pstIndex];
-        } else {
-          pstVal = pstMap[piece.type][pstIndex];
-        }
+  g.board().forEach((row, r) => row.forEach((piece, c) => {
+    if (!piece) return;
 
-        // Nelson ELO 1300 adjustment: values early/active Queen moves more
-        if (personality === 'nelson' && piece.type === 'q') {
-          // Incentivize Queen activity and center control aggressively
-          pstVal += 15;
-        }
+    const isWhite = piece.color === 'w';
+    const pstIndex = isWhite ? (r * 8 + c) : ((7 - r) * 8 + c);
 
-        const totalValue = val + pstVal;
-        if (isWhite) {
-          score += totalValue;
-        } else {
-          score -= totalValue;
-        }
-      }
+    let pstVal = 0;
+    if (piece.type === 'k') {
+      pstVal = endgame ? pstMap.k_end[pstIndex] : pstMap.k_mid[pstIndex];
+    } else {
+      pstVal = pstMap[piece.type][pstIndex];
     }
-  }
 
-  // Draw buffer penalty/incentives
-  if (chessInstance.inDraw()) {
-    return 0; // Draw is neutral score
-  }
+    if (personality === 'nelson' && piece.type === 'q') pstVal += 15;
+
+    const total = PIECE_VALUES[piece.type] + pstVal;
+    score += isWhite ? total : -total;
+  }));
 
   return score;
 }
 
-// Move ordering for Alpha-Beta efficiency (MVV-LVA)
-function orderMoves(chessInstance, moves) {
-  return moves.map(move => {
-    let score = 0;
-    
-    // Sort captures by MVV-LVA (Most Valuable Victim - Least Valuable Aggressor)
-    if (move.captured) {
-      const victimValue = PIECE_VALUES[move.captured] || 0;
-      const attackerValue = PIECE_VALUES[move.piece] || 0;
-      score += 1000 + (victimValue - attackerValue / 100);
-    }
-    
-    // Promote moves get priority
-    if (move.promotion) {
-      score += 900;
-    }
-
-    // Giving a check is highly prioritized
-    // Note: check requires making the move and verifying, which is heavy,
-    // so we can approximate or use simple flags if available,
-    // but standard MVV-LVA + promotion is usually excellent.
-    if (move.san.includes('+')) {
-      score += 500;
-    }
-
-    // Penalize moving pieces into squares attacked by lower value pieces
-    // (A simple heuristic that we can approximate)
-
-    return { move, score };
-  })
-  .sort((a, b) => b.score - a.score)
-  .map(item => item.move);
+// ─── Move ordering (MVV-LVA + promotions + checks) ───────────────────────────
+function orderMoves(g, moves) {
+  return moves
+    .map(move => {
+      let score = 0;
+      if (move.captured) {
+        score += 1000 + (PIECE_VALUES[move.captured] || 0) - (PIECE_VALUES[move.piece] || 0) / 100;
+      }
+      if (move.promotion) score += 900;
+      if (move.san && move.san.includes('+')) score += 500;
+      return { move, score };
+    })
+    .sort((a, b) => b.score - a.score)
+    .map(item => item.move);
 }
 
-// Simple transposition cache to avoid re-evaluating identical positions
+// ─── Transposition table ──────────────────────────────────────────────────────
 const transpositionTable = new Map();
 
 export function clearTranspositionTable() {
   transpositionTable.clear();
 }
 
-// Quiescence Search: search only captures to avoid the horizon effect
-function quiescenceSearch(chessInstance, alpha, beta, isWhite) {
-  const activeColor = chessInstance.turn();
-  const sideMultiplier = activeColor === 'w' ? 1 : -1;
-  const standPatScore = evaluateBoard(chessInstance) * sideMultiplier;
+// ─── Quiescence Search ────────────────────────────────────────────────────────
+function quiescenceSearch(g, alpha, beta, isWhite) {
+  const sideMultiplier = g.turn() === 'w' ? 1 : -1;
+  const standPat = evaluateBoard(g) * sideMultiplier;
 
   if (isWhite) {
-    if (standPatScore >= beta) return beta;
-    if (standPatScore > alpha) alpha = standPatScore;
-
-    // Generate only capture moves
-    const rawMoves = chessInstance.moves({ verbose: true }).filter(m => m.captured);
-    const orderedMovesList = orderMoves(chessInstance, rawMoves);
-
-    for (const move of orderedMovesList) {
-      chessInstance.move(move);
-      const score = quiescenceSearch(chessInstance, alpha, beta, false);
-      chessInstance.undo();
-
+    if (standPat >= beta) return beta;
+    if (standPat > alpha) alpha = standPat;
+    const captures = orderMoves(g, g.moves({ verbose: true }).filter(m => m.captured));
+    for (const move of captures) {
+      g.move(move);
+      const score = quiescenceSearch(g, alpha, beta, false);
+      g.undo();
       if (score >= beta) return beta;
       if (score > alpha) alpha = score;
     }
     return alpha;
   } else {
-    if (standPatScore <= alpha) return alpha;
-    if (standPatScore < beta) beta = standPatScore;
-
-    const rawMoves = chessInstance.moves({ verbose: true }).filter(m => m.captured);
-    const orderedMovesList = orderMoves(chessInstance, rawMoves);
-
-    for (const move of orderedMovesList) {
-      chessInstance.move(move);
-      const score = quiescenceSearch(chessInstance, alpha, beta, true);
-      chessInstance.undo();
-
+    if (standPat <= alpha) return alpha;
+    if (standPat < beta) beta = standPat;
+    const captures = orderMoves(g, g.moves({ verbose: true }).filter(m => m.captured));
+    for (const move of captures) {
+      g.move(move);
+      const score = quiescenceSearch(g, alpha, beta, true);
+      g.undo();
       if (score <= alpha) return alpha;
       if (score < beta) beta = score;
     }
@@ -271,133 +221,109 @@ function quiescenceSearch(chessInstance, alpha, beta, isWhite) {
   }
 }
 
-// Minimax with Alpha-Beta Pruning
-function minimax(chessInstance, depth, alpha, beta, isMaximizing, personality = 'standard') {
-  // Transposition check
-  const fen = chessInstance.fen().split(' ').slice(0, 4).join(' '); // Simple FEN representation
+// ─── Minimax with Alpha-Beta Pruning ─────────────────────────────────────────
+function minimax(g, depth, alpha, beta, isMaximizing, personality = 'standard') {
+  const fen = g.fen().split(' ').slice(0, 4).join(' ');
   const cached = transpositionTable.get(fen);
-  if (cached && cached.depth >= depth) {
-    return cached.score;
-  }
+  if (cached && cached.depth >= depth) return cached.score;
 
-  // Base cases
-  if (depth === 0) {
-    const qScore = quiescenceSearch(chessInstance, alpha, beta, isMaximizing);
-    return qScore;
-  }
+  if (depth === 0) return quiescenceSearch(g, alpha, beta, isMaximizing);
 
-  if (chessInstance.isGameOver()) {
-    if (chessInstance.inCheckmate()) {
-      // Checkmate score is weighted by depth so engine finds fastest mate
+  if (g.isGameOver()) {
+    if (isCheckmateState(g)) {
       return isMaximizing ? -25000 + (5 - depth) : 25000 - (5 - depth);
     }
     return 0; // Draw/stalemate
   }
 
-  const rawMoves = chessInstance.moves({ verbose: true });
-  const orderedMovesList = orderMoves(chessInstance, rawMoves);
+  const moves = orderMoves(g, g.moves({ verbose: true }));
 
   if (isMaximizing) {
     let maxEval = -Infinity;
-    for (const move of orderedMovesList) {
-      chessInstance.move(move);
-      const evaluation = minimax(chessInstance, depth - 1, alpha, beta, false, personality);
-      chessInstance.undo();
-      maxEval = Math.max(maxEval, evaluation);
-      alpha = Math.max(alpha, evaluation);
-      if (beta <= alpha) break; // Beta cut-off
+    for (const move of moves) {
+      g.move(move);
+      const eval_ = minimax(g, depth - 1, alpha, beta, false, personality);
+      g.undo();
+      maxEval = Math.max(maxEval, eval_);
+      alpha = Math.max(alpha, eval_);
+      if (beta <= alpha) break;
     }
     transpositionTable.set(fen, { score: maxEval, depth });
     return maxEval;
   } else {
     let minEval = Infinity;
-    for (const move of orderedMovesList) {
-      chessInstance.move(move);
-      const evaluation = minimax(chessInstance, depth - 1, alpha, beta, true, personality);
-      chessInstance.undo();
-      minEval = Math.min(minEval, evaluation);
-      beta = Math.min(beta, evaluation);
-      if (beta <= alpha) break; // Alpha cut-off
+    for (const move of moves) {
+      g.move(move);
+      const eval_ = minimax(g, depth - 1, alpha, beta, true, personality);
+      g.undo();
+      minEval = Math.min(minEval, eval_);
+      beta = Math.min(beta, eval_);
+      if (beta <= alpha) break;
     }
     transpositionTable.set(fen, { score: minEval, depth });
     return minEval;
   }
 }
 
-// Main AI API: returns the best move for the active turn
-export function getBestMove(chessInstance, botType = 'beth') {
-  const turn = chessInstance.turn(); // 'w' or 'b'
-  const isWhite = turn === 'w';
-  const possibleMoves = chessInstance.moves({ verbose: true });
-
-  if (possibleMoves.length === 0) return null;
-
-  // Martin: ELO 250 (plays randomly 80% of the time, otherwise depth 1 minimax)
-  if (botType === 'martin') {
-    if (Math.random() < 0.8) {
-      const randomIndex = Math.floor(Math.random() * possibleMoves.length);
-      return possibleMoves[randomIndex];
-    }
-    // Else do a quick depth 1 search to take free pieces
-    return getMinimaxBestMove(chessInstance, 1, isWhite, 'standard');
-  }
-
-  // Nelson: ELO 1300 (heavy Queen bias, depth 3 search)
-  if (botType === 'nelson') {
-    return getMinimaxBestMove(chessInstance, 3, isWhite, 'nelson');
-  }
-
-  // Beth: ELO 1800 (depth 4 positional search)
-  if (botType === 'beth') {
-    return getMinimaxBestMove(chessInstance, 4, isWhite, 'standard');
-  }
-
-  // Antigravity AI: ELO 2200 (depth 4/5 optimized search with caching)
-  if (botType === 'antigravity') {
-    // If fewer pieces are on the board, we can search deeper (depth 5)
-    const pieceCount = chessInstance.board().flat().filter(p => p !== null).length;
-    const depth = pieceCount < 12 ? 5 : 4;
-    return getMinimaxBestMove(chessInstance, depth, isWhite, 'standard');
-  }
-
-  // Default to Beth
-  return getMinimaxBestMove(chessInstance, 4, isWhite, 'standard');
-}
-
-// Find the best move using minimax alpha-beta search
-function getMinimaxBestMove(chessInstance, depth, isWhite, personality) {
-  const possibleMoves = chessInstance.moves({ verbose: true });
-  const orderedMovesList = orderMoves(chessInstance, possibleMoves);
-
+// ─── Internal: run minimax and return best move ───────────────────────────────
+function getMinimaxBestMove(g, depth, isWhite, personality) {
+  const moves = orderMoves(g, g.moves({ verbose: true }));
   let bestMove = null;
   let alpha = -Infinity;
   let beta = Infinity;
 
   if (isWhite) {
-    let bestValue = -Infinity;
-    for (const move of orderedMovesList) {
-      chessInstance.move(move);
-      const boardValue = minimax(chessInstance, depth - 1, alpha, beta, false, personality);
-      chessInstance.undo();
-      if (boardValue > bestValue) {
-        bestValue = boardValue;
-        bestMove = move;
-      }
-      alpha = Math.max(alpha, boardValue);
+    let bestVal = -Infinity;
+    for (const move of moves) {
+      g.move(move);
+      const val = minimax(g, depth - 1, alpha, beta, false, personality);
+      g.undo();
+      if (val > bestVal) { bestVal = val; bestMove = move; }
+      alpha = Math.max(alpha, val);
     }
   } else {
-    let bestValue = Infinity;
-    for (const move of orderedMovesList) {
-      chessInstance.move(move);
-      const boardValue = minimax(chessInstance, depth - 1, alpha, beta, true, personality);
-      chessInstance.undo();
-      if (boardValue < bestValue) {
-        bestValue = boardValue;
-        bestMove = move;
-      }
-      beta = Math.min(beta, boardValue);
+    let bestVal = Infinity;
+    for (const move of moves) {
+      g.move(move);
+      const val = minimax(g, depth - 1, alpha, beta, true, personality);
+      g.undo();
+      if (val < bestVal) { bestVal = val; bestMove = move; }
+      beta = Math.min(beta, val);
     }
   }
 
   return bestMove;
+}
+
+// ─── Public API: returns the best move for the bot ───────────────────────────
+/**
+ * @param {Chess} g - chess.js v1.x instance
+ * @param {string} botType - 'martin' | 'nelson' | 'beth' | 'antigravity'
+ */
+export function getBestMove(g, botType = 'beth') {
+  const isWhite = g.turn() === 'w';
+  const moves = g.moves({ verbose: true });
+  if (moves.length === 0) return null;
+
+  switch (botType) {
+    case 'martin':
+      // 80% random, 20% depth-1 greedy
+      if (Math.random() < 0.8) return moves[Math.floor(Math.random() * moves.length)];
+      return getMinimaxBestMove(g, 1, isWhite, 'standard');
+
+    case 'nelson':
+      return getMinimaxBestMove(g, 3, isWhite, 'nelson');
+
+    case 'beth':
+      return getMinimaxBestMove(g, 4, isWhite, 'standard');
+
+    case 'antigravity': {
+      const pieceCount = g.board().flat().filter(Boolean).length;
+      const depth = pieceCount < 12 ? 5 : 4;
+      return getMinimaxBestMove(g, depth, isWhite, 'standard');
+    }
+
+    default:
+      return getMinimaxBestMove(g, 4, isWhite, 'standard');
+  }
 }

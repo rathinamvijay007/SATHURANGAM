@@ -1,478 +1,414 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Chess } from 'chess.js';
 import confetti from 'canvas-confetti';
 import { soundManager } from './soundManager';
-import { getBestMove, evaluateBoard, clearTranspositionTable } from './chessEngine';
+import { getBestMove, evaluateBoard, clearTranspositionTable, PIECE_VALUES } from './chessEngine';
 import { getPieceImg } from './chessPieces';
+import { apiLogin, apiRegister, apiLogout, apiGetMe, apiGetLeaderboard, clearTokens, getToken } from './api';
 import './App.css';
 
-// Bot Profiles details
+// ─── Constants ────────────────────────────────────────────────────────────────
+
 const BOTS = {
-  martin: { name: 'Martin', elo: 250, avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=100&auto=format&fit=crop&q=60', tag: 'martin' },
-  nelson: { name: 'Nelson', elo: 1300, avatar: 'https://images.unsplash.com/photo-1560250097-0b93528c311a?w=100&auto=format&fit=crop&q=60', tag: 'nelson' },
-  beth: { name: 'Beth', elo: 1800, avatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=100&auto=format&fit=crop&q=60', tag: 'beth' },
+  martin:      { name: 'Martin',         elo: 250,  avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=100&auto=format&fit=crop&q=60', tag: 'martin' },
+  nelson:      { name: 'Nelson',         elo: 1300, avatar: 'https://images.unsplash.com/photo-1560250097-0b93528c311a?w=100&auto=format&fit=crop&q=60', tag: 'nelson' },
+  beth:        { name: 'Beth',           elo: 1800, avatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=100&auto=format&fit=crop&q=60', tag: 'beth' },
   antigravity: { name: 'Antigravity AI', elo: 2200, avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=100&auto=format&fit=crop&q=60', tag: 'antigravity' }
 };
 
 const TIME_CONTROLS = {
-  unlimited: { name: 'Unlimited', seconds: Infinity },
-  rapid: { name: '10 Min (Rapid)', seconds: 600 },
-  blitz: { name: '3 Min (Blitz)', seconds: 180 },
-  bullet: { name: '1 Min (Bullet)', seconds: 60 }
+  unlimited: { name: 'Unlimited',      seconds: Infinity },
+  rapid:     { name: '10 Min (Rapid)', seconds: 600 },
+  blitz:     { name: '3 Min (Blitz)',  seconds: 180 },
+  bullet:    { name: '1 Min (Bullet)', seconds: 60 }
 };
 
+// ─── chess.js v1.x safe wrappers ──────────────────────────────────────────────
+const isCheckmate = (g) => typeof g.isCheckmate === 'function' ? g.isCheckmate() : false;
+const isStalemate = (g) => typeof g.isStalemate === 'function' ? g.isStalemate() : false;
+const isThreefold = (g) => typeof g.isThreefoldRepetition === 'function' ? g.isThreefoldRepetition() : false;
+const isInsufficient = (g) => typeof g.isInsufficientMaterial === 'function' ? g.isInsufficientMaterial() : false;
+const isDraw = (g) => typeof g.isDraw === 'function' ? g.isDraw() : (isStalemate(g) || isThreefold(g) || isInsufficient(g));
+
+// ─── App ──────────────────────────────────────────────────────────────────────
 function App() {
-  // Game instance & History states
-  const [game, setGame] = useState(() => new Chess());
-  const [board, setBoard] = useState(() => game.board());
-  const [turn, setTurn] = useState('w');
-  const [history, setHistory] = useState([]); // List of verbose move objects
-  const [historyIndex, setHistoryIndex] = useState(-1); // -1 means viewing current live state
-  
-  // UI & Selection states
+  // Game state
+  const [game, setGame]                   = useState(() => new Chess());
+  const [board, setBoard]                 = useState(() => new Chess().board());
+  const [turn, setTurn]                   = useState('w');
+  const [history, setHistory]             = useState([]);
+  const [historyIndex, setHistoryIndex]   = useState(-1);
+
+  // UI state
   const [selectedSquare, setSelectedSquare] = useState(null);
-  const [legalMoves, setLegalMoves] = useState([]);
-  const [lastMove, setLastMove] = useState(null);
-  const [checkSquare, setCheckSquare] = useState(null);
-  const [boardFlipped, setBoardFlipped] = useState(false);
-  const [theme, setTheme] = useState('neo-green');
-  const [soundOn, setSoundOn] = useState(true);
-  
-  // Players & Bots setup
-  const [selectedBot, setSelectedBot] = useState('martin');
-  const [timeControl, setTimeControl] = useState('rapid');
-  const [botThinking, setBotThinking] = useState(false);
-  
-  // Evaluation & Game Review States
-  const [evaluation, setEvaluation] = useState(0); // centipawns (from white's perspective)
-  const [moveQualities, setMoveQualities] = useState([]); // Classifications for each move: 'best', 'blunder', etc.
-  const [accuracyStats, setAccuracyStats] = useState(null); // { whiteAccuracy, blackAccuracy, counts }
-  const [showReview, setShowReview] = useState(false);
-  
-  // Timers states
-  const [whiteTime, setWhiteTime] = useState(600);
-  const [blackTime, setBlackTime] = useState(600);
-  const timerIntervalRef = useRef(null);
-  
-  // Promotion selection dialog
-  const [pendingPromotion, setPendingPromotion] = useState(null); // { from, to }
+  const [legalMoves, setLegalMoves]         = useState([]);
+  const [lastMove, setLastMove]             = useState(null);
+  const [checkSquare, setCheckSquare]       = useState(null);
+  const [boardFlipped, setBoardFlipped]     = useState(false);
+  const [theme, setTheme]                   = useState('neo-green');
+  const [soundOn, setSoundOn]               = useState(true);
 
-  // Game over overlay
-  const [gameOverModal, setGameOverModal] = useState(null); // { title, reason, isWin }
+  // Bot & game config
+  const [selectedBot, setSelectedBot]     = useState('martin');
+  const [timeControl, setTimeControl]     = useState('rapid');
+  const [playerColor, setPlayerColor]     = useState('w'); // 'w' = human plays white, 'b' = human plays black
+  const [botThinking, setBotThinking]     = useState(false);
 
-  // 1. Manage Active Game Timers
+  // Evaluation & review
+  const [evaluation, setEvaluation]           = useState(0);
+  const [moveQualities, setMoveQualities]     = useState([]);
+  const [accuracyStats, setAccuracyStats]     = useState(null);
+  const [showReview, setShowReview]           = useState(false);
+
+  // Timers
+  const [whiteTime, setWhiteTime]   = useState(600);
+  const [blackTime, setBlackTime]   = useState(600);
+  const timerIntervalRef            = useRef(null);
+
+  // Promotion dialog
+  const [pendingPromotion, setPendingPromotion] = useState(null);
+
+  // Game over
+  const [gameOverModal, setGameOverModal] = useState(null);
+
+  // Backend auth state
+  const [currentUser, setCurrentUser]   = useState(null);
+  const [authModal, setAuthModal]       = useState(null); // 'login' | 'register' | null
+  const [authForm, setAuthForm]         = useState({ username: '', email: '', loginId: '', password: '' });
+  const [authError, setAuthError]       = useState('');
+  const [authLoading, setAuthLoading]   = useState(false);
+  const [leaderboard, setLeaderboard]   = useState([]);
+  const [showLeaderboard, setShowLeaderboard] = useState(false);
+  const backendOnline                   = useRef(false);
+
+  // ── Boot: restore session from localStorage ──────────────────────────────
   useEffect(() => {
-    // Clear old timer
+    if (getToken()) {
+      apiGetMe()
+        .then(user => { setCurrentUser(user); backendOnline.current = true; })
+        .catch(() => { clearTokens(); });
+    } else {
+      // Ping backend to check if it is available
+      fetch('http://localhost:5000/health').then(() => { backendOnline.current = true; }).catch(() => {});
+    }
+  }, []);
+
+  // ── Timer logic ───────────────────────────────────────────────────────────
+  useEffect(() => {
     if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
-    
     const limit = TIME_CONTROLS[timeControl].seconds;
     if (limit === Infinity || game.isGameOver() || gameOverModal) return;
 
     timerIntervalRef.current = setInterval(() => {
       if (turn === 'w') {
-        setWhiteTime((prev) => {
-          if (prev <= 1) {
-            handleTimeout('w');
-            return 0;
-          }
-          return prev - 1;
-        });
+        setWhiteTime(prev => { if (prev <= 1) { handleTimeout('w'); return 0; } return prev - 1; });
       } else {
-        setBlackTime((prev) => {
-          if (prev <= 1) {
-            handleTimeout('b');
-            return 0;
-          }
-          return prev - 1;
-        });
+        setBlackTime(prev => { if (prev <= 1) { handleTimeout('b'); return 0; } return prev - 1; });
       }
     }, 1000);
 
     return () => clearInterval(timerIntervalRef.current);
   }, [turn, timeControl, game, gameOverModal]);
 
-  // Reset timers on time control selection
   useEffect(() => {
     const limit = TIME_CONTROLS[timeControl].seconds;
-    setWhiteTime(limit);
-    setBlackTime(limit);
+    setWhiteTime(limit === Infinity ? Infinity : limit);
+    setBlackTime(limit === Infinity ? Infinity : limit);
   }, [timeControl]);
 
-  // 2. Play bot move when it is black's turn and game is active
+  // ── Bot move trigger ──────────────────────────────────────────────────────
+  // Bot plays whichever color the human is NOT playing
+  const botColor = playerColor === 'w' ? 'b' : 'w';
+
   useEffect(() => {
-    if (turn === 'b' && !game.isGameOver() && !gameOverModal && !botThinking && historyIndex === -1) {
+    if (
+      turn === botColor &&
+      !game.isGameOver() &&
+      !gameOverModal &&
+      !botThinking &&
+      historyIndex === -1
+    ) {
       setBotThinking(true);
-      
-      // Calculate delay based on ELO to simulate thinking
-      const baseDelay = selectedBot === 'martin' ? 400 : selectedBot === 'nelson' ? 800 : selectedBot === 'beth' ? 1200 : 1800;
-      const thinkingDelay = baseDelay + Math.random() * 500;
+      const delay = { martin: 400, nelson: 800, beth: 1200, antigravity: 1800 }[selectedBot] || 800;
+      const jitter = Math.random() * 500;
 
-      setTimeout(() => {
-        const botMove = getBestMove(game, selectedBot);
-        if (botMove) {
-          executeMove(botMove.from, botMove.to, botMove.promotion || 'q');
+      const timer = setTimeout(async () => {
+        try {
+          const depth = { martin: 2, nelson: 6, beth: 10, antigravity: 14 }[selectedBot] || 10;
+          const res = await fetch('https://chess-api.com/v1', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fen: game.fen(), depth })
+          });
+          const data = await res.json();
+          if (data && data.from && data.to) {
+            const promotion = data.move && data.move.length === 5 ? data.move[4] : undefined;
+            executeMove(data.from, data.to, promotion);
+          } else {
+             const moves = game.moves({ verbose: true });
+             const fallback = moves[Math.floor(Math.random() * moves.length)];
+             if (fallback) executeMove(fallback.from, fallback.to, fallback.promotion || 'q');
+          }
+        } catch (e) {
+           const moves = game.moves({ verbose: true });
+           const fallback = moves[Math.floor(Math.random() * moves.length)];
+           if (fallback) executeMove(fallback.from, fallback.to, fallback.promotion || 'q');
+        } finally {
+          setBotThinking(false);
         }
-        setBotThinking(false);
-      }, thinkingDelay);
-    }
-  }, [turn, game, selectedBot, gameOverModal, historyIndex]);
+      }, delay + jitter);
 
-  // Clear transp table on unmount
-  useEffect(() => {
-    return () => clearTranspositionTable();
+      return () => clearTimeout(timer);
+    }
+  }, [turn, game, selectedBot, gameOverModal, historyIndex, botColor]);
+
+  useEffect(() => () => clearTranspositionTable(), []);
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
+  const formatTime = (s) => {
+    if (!isFinite(s)) return '∞';
+    const m = Math.floor(s / 60);
+    return `${String(m).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+  };
+
+  const findKingSquare = useCallback((g, color) => {
+    for (let r = 0; r < 8; r++) {
+      for (let c = 0; c < 8; c++) {
+        const p = g.board()[r][c];
+        if (p && p.type === 'k' && p.color === color) {
+          return String.fromCharCode(97 + c) + (8 - r);
+        }
+      }
+    }
+    return null;
   }, []);
 
-  // Helper: Format Time into MM:SS
-  const formatTime = (timeInSecs) => {
-    if (timeInSecs === Infinity) return '∞';
-    const mins = Math.floor(timeInSecs / 60);
-    const secs = timeInSecs % 60;
-    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-  };
+  const triggerConfetti = () => confetti({ particleCount: 150, spread: 80, origin: { y: 0.6 } });
 
-  // Helper: Get Checkmate or Draw State checking compatibility with older chess.js
-  const checkCheckmate = (g) => {
-    return g.inCheckmate ? g.inCheckmate() : (g.isCheckmate ? g.isCheckmate() : false);
-  };
-
-  const checkDraw = (g) => {
-    if (g.inDraw) return g.inDraw();
-    return g.isDraw ? g.isDraw() : (g.inStalemate() || g.inThreefoldRepetition() || g.inInsufficientMaterial());
-  };
-
-  // Timeout handler
-  const handleTimeout = (timedOutColor) => {
-    clearInterval(timerIntervalRef.current);
-    if (soundOn) soundManager.playGameOver(timedOutColor === 'b');
-    
-    if (timedOutColor === 'w') {
-      setGameOverModal({
-        title: 'Black Wins!',
-        reason: 'White ran out of time.',
-        isWin: false
-      });
-    } else {
-      triggerConfetti();
-      setGameOverModal({
-        title: 'White Wins!',
-        reason: 'Black ran out of time.',
-        isWin: true
-      });
-    }
-  };
-
-  // Resign handler
-  const handleResign = () => {
-    if (game.isGameOver() || gameOverModal) return;
-    clearInterval(timerIntervalRef.current);
-    if (soundOn) soundManager.playGameOver(false);
-
-    setGameOverModal({
-      title: 'Black Wins!',
-      reason: 'White resigned.',
-      isWin: false
-    });
-  };
-
-  // Trigger celebration confetti
-  const triggerConfetti = () => {
-    confetti({
-      particleCount: 150,
-      spread: 80,
-      origin: { y: 0.6 }
-    });
-  };
-
-  // Classify move compared to best move evaluation drop
-  const classifyMove = (evalBefore, evalAfter, playedMove, bestMoveScore, isWhiteTurn, isOpening) => {
-    const scoreDiff = isWhiteTurn ? (bestMoveScore - evalAfter) : (evalAfter - bestMoveScore);
-    const drop = Math.abs(scoreDiff);
-
-    // Book move check (approximate for first 5 full moves)
+  // ── Move quality analysis ─────────────────────────────────────────────────
+  const classifyMove = (evalBefore, evalAfter, bestScore, isWhiteTurn, isOpening) => {
+    const drop = Math.abs(isWhiteTurn ? (bestScore - evalAfter) : (evalAfter - bestScore));
     if (isOpening && drop <= 15) return 'book';
-
-    if (drop === 0) {
-      // If it's a winning tactical blow, mark it brilliant!
-      if (Math.abs(evalAfter) > 600 && Math.abs(evalBefore) < 150) {
-        return 'brilliant';
-      }
-      return 'best';
-    }
-    
-    if (drop <= 20) return 'excellent';
-    if (drop <= 50) return 'good';
+    if (drop === 0) return Math.abs(evalAfter) > 600 && Math.abs(evalBefore) < 150 ? 'brilliant' : 'best';
+    if (drop <= 20)  return 'excellent';
+    if (drop <= 50)  return 'good';
     if (drop <= 100) return 'inaccuracy';
     if (drop <= 200) return 'mistake';
     return 'blunder';
   };
 
-  // Calculate Accuracies and Quality Summary
   const compileGameReview = (movesList, qualities) => {
-    if (movesList.length === 0) return;
-    
-    let whiteTotalLoss = 0;
-    let whiteCount = 0;
-    let blackTotalLoss = 0;
-    let blackCount = 0;
-
+    if (!movesList.length) return;
+    let wLoss = 0, wCount = 0, bLoss = 0, bCount = 0;
     const counts = {
-      white: { brilliant: 0, great: 0, best: 0, book: 0, good: 0, inaccuracy: 0, mistake: 0, blunder: 0 },
-      black: { brilliant: 0, great: 0, best: 0, book: 0, good: 0, inaccuracy: 0, mistake: 0, blunder: 0 }
+      white: { brilliant:0, best:0, book:0, good:0, excellent:0, inaccuracy:0, mistake:0, blunder:0 },
+      black: { brilliant:0, best:0, book:0, good:0, excellent:0, inaccuracy:0, mistake:0, blunder:0 }
     };
 
-    qualities.forEach((q, idx) => {
-      const isWhite = idx % 2 === 0;
-      const key = isWhite ? 'white' : 'black';
-      
-      counts[key][q.quality]++;
-
-      // Calculate centipawn drop (capped at 400 to avoid mate inflation)
-      const loss = Math.min(q.drop, 400);
-      if (isWhite) {
-        whiteTotalLoss += loss;
-        whiteCount++;
-      } else {
-        blackTotalLoss += loss;
-        blackCount++;
-      }
+    qualities.forEach(({ quality, drop }, idx) => {
+      const key = idx % 2 === 0 ? 'white' : 'black';
+      if (counts[key][quality] !== undefined) counts[key][quality]++;
+      const loss = Math.min(drop, 400);
+      if (key === 'white') { wLoss += loss; wCount++; }
+      else { bLoss += loss; bCount++; }
     });
 
-    const whiteAvgLoss = whiteCount > 0 ? (whiteTotalLoss / whiteCount) : 0;
-    const blackAvgLoss = blackCount > 0 ? (blackTotalLoss / blackCount) : 0;
-
-    // Chess.com style accuracy formula: 100 * e^(-0.005 * avg_loss)
-    const whiteAccuracy = Math.round(100 * Math.exp(-0.003 * whiteAvgLoss));
-    const blackAccuracy = Math.round(100 * Math.exp(-0.003 * blackAvgLoss));
-
-    setAccuracyStats({
-      whiteAccuracy,
-      blackAccuracy,
-      counts
-    });
+    const acc = (loss, count) => count > 0 ? Math.round(100 * Math.exp(-0.003 * (loss / count))) : 100;
+    setAccuracyStats({ whiteAccuracy: acc(wLoss, wCount), blackAccuracy: acc(bLoss, bCount), counts });
   };
 
-  // Execute board move update
+  // ── Execute move (single source of truth) ─────────────────────────────────
   const executeMove = (from, to, promotion = 'q') => {
     const isWhiteTurn = game.turn() === 'w';
-    const isOpening = history.length < 10;
-    
-    // Check values before move for evaluation comparison
-    const evalBefore = evaluateBoard(game);
+    const isOpening   = history.length < 10;
+    const evalBefore  = evaluateBoard(game);
 
-    // Calculate best move score to compare against played move
-    const moves = game.moves({ verbose: true });
-    let bestMoveVal = isWhiteTurn ? -Infinity : Infinity;
-    
-    moves.forEach(m => {
+    // Best move score for quality classification
+    let bestScore = isWhiteTurn ? -Infinity : Infinity;
+    game.moves({ verbose: true }).forEach(m => {
       game.move(m);
-      const val = evaluateBoard(game);
+      const v = evaluateBoard(game);
       game.undo();
-      if (isWhiteTurn) {
-        if (val > bestMoveVal) bestMoveVal = val;
-      } else {
-        if (val < bestMoveVal) bestMoveVal = val;
-      }
+      if (isWhiteTurn ? v > bestScore : v < bestScore) bestScore = v;
     });
 
-    // Determine move outcomes (check, capture, promote)
-    const checkState = game.inCheck();
-    let moveObj = null;
-    try {
-      moveObj = game.move({ from, to, promotion });
-    } catch (e) {
-      return; // Invalid move
-    }
-
+    // Apply move
+    let moveObj;
+    try { moveObj = game.move({ from, to, promotion }); }
+    catch { return; }
     if (!moveObj) return;
 
-    // Audio Playback
+    // Sound
     if (soundOn) {
-      if (moveObj.promotion) {
-        soundManager.playPromote();
-      } else if (game.inCheck()) {
-        soundManager.playCheck();
-      } else if (moveObj.captured) {
-        soundManager.playCapture();
-      } else {
-        soundManager.playMove();
-      }
+      if (moveObj.promotion)  soundManager.playPromote();
+      else if (game.inCheck()) soundManager.playCheck();
+      else if (moveObj.captured) soundManager.playCapture();
+      else soundManager.playMove();
     }
 
-    // Determine evaluation after move
-    const evalAfter = evaluateBoard(game);
-    const drop = Math.abs(evalAfter - bestMoveVal);
-    const quality = classifyMove(evalBefore, evalAfter, moveObj, bestMoveVal, isWhiteTurn, isOpening);
+    const evalAfter  = evaluateBoard(game);
+    const drop       = Math.abs(evalAfter - bestScore);
+    const quality    = classifyMove(evalBefore, evalAfter, bestScore, isWhiteTurn, isOpening);
 
-    // Update move history lists
-    const updatedHistory = [...history, moveObj];
-    const updatedQualities = [...moveQualities, { quality, drop }];
+    const newHistory    = [...history, moveObj];
+    const newQualities  = [...moveQualities, { quality, drop }];
 
-    // Set board states
-    setHistory(updatedHistory);
-    setMoveQualities(updatedQualities);
+    setHistory(newHistory);
+    setMoveQualities(newQualities);
     setBoard(game.board());
     setTurn(game.turn());
     setLastMove({ from, to });
     setSelectedSquare(null);
     setLegalMoves([]);
     setEvaluation(evalAfter);
+    setCheckSquare(game.inCheck() ? findKingSquare(game, game.turn()) : null);
 
-    // Handle check glow
-    if (game.inCheck()) {
-      // Find king of active side
-      const boardGrid = game.board();
-      let kSq = null;
-      for (let r = 0; r < 8; r++) {
-        for (let c = 0; c < 8; c++) {
-          const p = boardGrid[r][c];
-          if (p && p.type === 'k' && p.color === game.turn()) {
-            kSq = String.fromCharCode(97 + c) + (8 - r);
-          }
-        }
-      }
-      setCheckSquare(kSq);
-    } else {
-      setCheckSquare(null);
-    }
-
-    // Handle Game Over
+    // Game over detection using v1.x safe wrappers
     if (game.isGameOver()) {
       clearInterval(timerIntervalRef.current);
-      
-      let winnerColor = null;
-      let modalReason = 'Draw';
-      
-      if (checkCheckmate(game)) {
-        winnerColor = isWhiteTurn ? 'w' : 'b';
-        modalReason = `Checkmate. ${winnerColor === 'w' ? 'White' : 'Black'} wins!`;
-        if (soundOn) soundManager.playGameOver(winnerColor === 'w');
-      } else if (game.inDraw ? game.inDraw() : false) {
-        modalReason = 'Game drawn.';
-        if (soundOn) soundManager.playGameOver(true);
-      } else if (game.inStalemate()) {
-        modalReason = 'Stalemate.';
-        if (soundOn) soundManager.playGameOver(true);
-      } else if (game.inThreefoldRepetition()) {
-        modalReason = 'Threefold repetition draw.';
-        if (soundOn) soundManager.playGameOver(true);
-      } else if (game.inInsufficientMaterial()) {
-        modalReason = 'Draw by insufficient material.';
-        if (soundOn) soundManager.playGameOver(true);
+      let title = 'Draw Game', reason = 'Draw', isWin = null;
+
+      if (isCheckmate(game)) {
+        const winner = isWhiteTurn ? 'w' : 'b';
+        title  = winner === 'w' ? 'White Wins!' : 'Black Wins!';
+        reason = `Checkmate! ${winner === 'w' ? 'White' : 'Black'} wins.`;
+        isWin  = winner === playerColor;
+        if (soundOn) soundManager.playGameOver(isWin);
+        if (isWin) triggerConfetti();
+      } else if (isStalemate(game)) {
+        reason = 'Stalemate — draw.';
+        if (soundOn) soundManager.playGameOver(false);
+      } else if (isThreefold(game)) {
+        reason = 'Threefold repetition — draw.';
+        if (soundOn) soundManager.playGameOver(false);
+      } else if (isInsufficient(game)) {
+        reason = 'Insufficient material — draw.';
+        if (soundOn) soundManager.playGameOver(false);
+      } else if (isDraw(game)) {
+        reason = 'Draw (50-move rule or agreement).';
+        if (soundOn) soundManager.playGameOver(false);
       }
 
-      setGameOverModal({
-        title: winnerColor ? (winnerColor === 'w' ? 'White Wins!' : 'Black Wins!') : 'Draw Game',
-        reason: modalReason,
-        isWin: winnerColor === 'w'
-      });
-
-      if (winnerColor === 'w') {
-        triggerConfetti();
-      }
-
-      // Compile game review stats
-      compileGameReview(updatedHistory, updatedQualities);
+      setGameOverModal({ title, reason, isWin });
+      compileGameReview(newHistory, newQualities);
     }
   };
 
-  // 3. User Square Selection & Move Handling
+  // ── Square click handler ──────────────────────────────────────────────────
   const handleSquareClick = (square) => {
-    // If viewing historical positions, click does nothing
     if (historyIndex !== -1 || botThinking || game.isGameOver() || gameOverModal) return;
+    // Only allow human to move their pieces
+    if (game.turn() !== playerColor) return;
 
-    const file = square.charCodeAt(0) - 97;
-    const rank = 8 - parseInt(square.charAt(1));
+    const file  = square.charCodeAt(0) - 97;
+    const rank  = 8 - parseInt(square.charAt(1));
     const piece = board[rank][file];
 
-    // If legal move indicator clicked, execute the move!
     if (legalMoves.includes(square)) {
-      // Check for pawn promotion (White pawn to 8th rank, Black pawn to 1st rank)
-      const selectedPiece = board[8 - parseInt(selectedSquare.charAt(1))][selectedSquare.charCodeAt(0) - 97];
+      // Check promotion
+      const selFile = selectedSquare.charCodeAt(0) - 97;
+      const selRank = 8 - parseInt(selectedSquare.charAt(1));
+      const selPiece = board[selRank][selFile];
       if (
-        selectedPiece && 
-        selectedPiece.type === 'p' && 
-        ((selectedPiece.color === 'w' && square.charAt(1) === '8') || 
-         (selectedPiece.color === 'b' && square.charAt(1) === '1'))
+        selPiece?.type === 'p' &&
+        ((selPiece.color === 'w' && square.charAt(1) === '8') ||
+         (selPiece.color === 'b' && square.charAt(1) === '1'))
       ) {
         setPendingPromotion({ from: selectedSquare, to: square });
         return;
       }
-
       executeMove(selectedSquare, square);
       return;
     }
 
-    // Select piece click
-    if (piece && piece.color === 'w') {
+    if (piece && piece.color === playerColor) {
       setSelectedSquare(square);
-      // Retrieve legal moves for selection
-      const moves = game.moves({ square, verbose: true });
-      setLegalMoves(moves.map(m => m.to));
+      setLegalMoves(game.moves({ square, verbose: true }).map(m => m.to));
     } else {
       setSelectedSquare(null);
       setLegalMoves([]);
     }
   };
 
-  // Drag and Drop implementation
+  // ── Drag & drop ───────────────────────────────────────────────────────────
   const handleDragStart = (e, square) => {
-    if (historyIndex !== -1 || botThinking || game.isGameOver() || gameOverModal) {
+    if (historyIndex !== -1 || botThinking || game.isGameOver() || gameOverModal || game.turn() !== playerColor) {
       e.preventDefault();
       return;
     }
-    const file = square.charCodeAt(0) - 97;
-    const rank = 8 - parseInt(square.charAt(1));
+    const file  = square.charCodeAt(0) - 97;
+    const rank  = 8 - parseInt(square.charAt(1));
     const piece = board[rank][file];
 
-    if (piece && piece.color === 'w') {
+    if (piece && piece.color === playerColor) {
       setSelectedSquare(square);
-      const moves = game.moves({ square, verbose: true });
-      setLegalMoves(moves.map(m => m.to));
+      setLegalMoves(game.moves({ square, verbose: true }).map(m => m.to));
       e.dataTransfer.setData('text/plain', square);
     } else {
       e.preventDefault();
     }
   };
 
-  const handleDrop = (e, targetSquare) => {
+  const handleDrop = (e, target) => {
     e.preventDefault();
-    const sourceSquare = e.dataTransfer.getData('text/plain');
-    if (sourceSquare && legalMoves.includes(targetSquare)) {
-      // Check for pawn promotion
-      const rank = 8 - parseInt(sourceSquare.charAt(1));
-      const file = sourceSquare.charCodeAt(0) - 97;
-      const piece = board[rank][file];
+    const src = e.dataTransfer.getData('text/plain');
+    if (!src || !legalMoves.includes(target)) return;
 
-      if (
-        piece && 
-        piece.type === 'p' && 
-        ((piece.color === 'w' && targetSquare.charAt(1) === '8') || 
-         (piece.color === 'b' && targetSquare.charAt(1) === '1'))
-      ) {
-        setPendingPromotion({ from: sourceSquare, to: targetSquare });
-        return;
-      }
+    const file  = src.charCodeAt(0) - 97;
+    const rank  = 8 - parseInt(src.charAt(1));
+    const piece = board[rank][file];
 
-      executeMove(sourceSquare, targetSquare);
+    if (
+      piece?.type === 'p' &&
+      ((piece.color === 'w' && target.charAt(1) === '8') ||
+       (piece.color === 'b' && target.charAt(1) === '1'))
+    ) {
+      setPendingPromotion({ from: src, to: target });
+      return;
     }
+    executeMove(src, target);
   };
 
-  const handleDragOver = (e) => {
-    e.preventDefault(); // Required to allow drop
-  };
+  const handleDragOver = (e) => e.preventDefault();
 
-  // Promotion choice execution
-  const resolvePromotion = (promotionPiece) => {
+  const resolvePromotion = (piece) => {
     if (!pendingPromotion) return;
-    executeMove(pendingPromotion.from, pendingPromotion.to, promotionPiece);
+    executeMove(pendingPromotion.from, pendingPromotion.to, piece);
     setPendingPromotion(null);
   };
 
-  // Reset Game
+  // ── Timeout ───────────────────────────────────────────────────────────────
+  const handleTimeout = (timedColor) => {
+    clearInterval(timerIntervalRef.current);
+    const winColor = timedColor === 'w' ? 'b' : 'w';
+    const isWin = winColor === playerColor;
+    if (soundOn) soundManager.playGameOver(isWin);
+    if (isWin) triggerConfetti();
+    setGameOverModal({
+      title: winColor === 'w' ? 'White Wins!' : 'Black Wins!',
+      reason: `${timedColor === 'w' ? 'White' : 'Black'} ran out of time.`,
+      isWin
+    });
+  };
+
+  // ── Resign ────────────────────────────────────────────────────────────────
+  const handleResign = () => {
+    if (game.isGameOver() || gameOverModal) return;
+    clearInterval(timerIntervalRef.current);
+    if (soundOn) soundManager.playGameOver(false);
+    const winColor = playerColor === 'w' ? 'b' : 'w';
+    setGameOverModal({
+      title: winColor === 'w' ? 'White Wins!' : 'Black Wins!',
+      reason: `${playerColor === 'w' ? 'White' : 'Black'} resigned.`,
+      isWin: false
+    });
+  };
+
+  // ── New game ──────────────────────────────────────────────────────────────
   const startNewGame = () => {
-    const newGame = new Chess();
-    setGame(newGame);
-    setBoard(newGame.board());
+    const g = new Chess();
+    setGame(g);
+    setBoard(g.board());
     setTurn('w');
     setHistory([]);
     setHistoryIndex(-1);
@@ -486,25 +422,21 @@ function App() {
     setShowReview(false);
     setGameOverModal(null);
     clearTranspositionTable();
-
     const limit = TIME_CONTROLS[timeControl].seconds;
-    setWhiteTime(limit);
-    setBlackTime(limit);
+    setWhiteTime(limit === Infinity ? Infinity : limit);
+    setBlackTime(limit === Infinity ? Infinity : limit);
+
+    // If human plays black, flip board by default
+    setBoardFlipped(playerColor === 'b');
   };
 
-  // Takeback / Undo last 2 moves (Player and Bot move)
+  // ── Undo (take back 2 plies) ──────────────────────────────────────────────
   const handleUndo = () => {
     if (historyIndex !== -1 || botThinking || history.length < 2) return;
-    
-    // Undo Bot move
     game.undo();
-    // Undo Player move
     game.undo();
-
-    // Recompute history
     const hist = game.history({ verbose: true });
-    const last = hist.length > 0 ? hist[hist.length - 1] : null;
-
+    const last = hist[hist.length - 1] ?? null;
     setBoard(game.board());
     setTurn(game.turn());
     setHistory(hist);
@@ -512,125 +444,113 @@ function App() {
     setLastMove(last ? { from: last.from, to: last.to } : null);
     setSelectedSquare(null);
     setLegalMoves([]);
-    setCheckSquare(game.inCheck() ? findKingSquare(game.turn()) : null);
+    setCheckSquare(game.inCheck() ? findKingSquare(game, game.turn()) : null);
     setEvaluation(evaluateBoard(game));
   };
 
-  const findKingSquare = (color) => {
-    const boardGrid = game.board();
-    for (let r = 0; r < 8; r++) {
-      for (let c = 0; c < 8; c++) {
-        const p = boardGrid[r][c];
-        if (p && p.type === 'k' && p.color === color) {
-          return String.fromCharCode(97 + c) + (8 - r);
-        }
-      }
-    }
-    return null;
-  };
-
-  // Flip board
-  const handleFlipBoard = () => {
-    setBoardFlipped(!boardFlipped);
-  };
-
-  // Navigation of historical positions
+  // ── History navigation ────────────────────────────────────────────────────
   const viewHistoricalPosition = (index) => {
     if (botThinking) return;
-
-    if (index === historyIndex) return;
-
-    const tempGame = new Chess();
-    for (let i = 0; i <= index; i++) {
-      tempGame.move(history[i]);
-    }
-
-    setBoard(tempGame.board());
+    const temp = new Chess();
+    for (let i = 0; i <= index; i++) temp.move(history[i]);
+    setBoard(temp.board());
     setHistoryIndex(index);
-    
-    // Highlight historical moves
-    const currentMove = history[index];
-    setLastMove({ from: currentMove.from, to: currentMove.to });
-    setCheckSquare(tempGame.inCheck() ? findKingSquare(tempGame.turn()) : null);
-    setEvaluation(evaluateBoard(tempGame));
+    setLastMove({ from: history[index].from, to: history[index].to });
+    setCheckSquare(temp.inCheck() ? findKingSquare(temp, temp.turn()) : null);
+    setEvaluation(evaluateBoard(temp));
   };
 
   const resumeLivePosition = () => {
     setBoard(game.board());
     setHistoryIndex(-1);
-    const last = history.length > 0 ? history[history.length - 1] : null;
+    const last = history[history.length - 1] ?? null;
     setLastMove(last ? { from: last.from, to: last.to } : null);
-    setCheckSquare(game.inCheck() ? findKingSquare(game.turn()) : null);
+    setCheckSquare(game.inCheck() ? findKingSquare(game, game.turn()) : null);
     setEvaluation(evaluateBoard(game));
   };
 
-  // Render Captured Pieces helper
+  // ── Captured pieces ───────────────────────────────────────────────────────
   const getCapturedPieces = (color) => {
-    const startingCounts = { p: 8, n: 2, b: 2, r: 2, q: 1 };
-    const currentCounts = { p: 0, n: 0, b: 0, r: 0, q: 0 };
-
-    // Count existing pieces on board
-    game.board().flat().forEach(p => {
-      if (p && p.color === color && p.type !== 'k') {
-        currentCounts[p.type]++;
-      }
-    });
-
-    const captured = [];
-    Object.keys(startingCounts).forEach(type => {
-      const diff = startingCounts[type] - currentCounts[type];
-      for (let i = 0; i < diff; i++) {
-        captured.push({ type, color });
-      }
-    });
-
-    return captured;
+    const start = { p:8, n:2, b:2, r:2, q:1 };
+    const cur   = { p:0, n:0, b:0, r:0, q:0 };
+    game.board().flat().forEach(p => { if (p && p.color === color && p.type !== 'k') cur[p.type]++; });
+    const caps = [];
+    Object.keys(start).forEach(t => { for (let i = 0; i < start[t] - cur[t]; i++) caps.push({ type:t, color }); });
+    return caps;
   };
 
-  // Calculate material difference score
   const getMaterialAdvantage = () => {
-    const whiteVal = getCapturedPieces('b').reduce((sum, p) => sum + (PIECE_VALUES[p.type] / 100), 0);
-    const blackVal = getCapturedPieces('w').reduce((sum, p) => sum + (PIECE_VALUES[p.type] / 100), 0);
-    const diff = whiteVal - blackVal;
-    
+    const wVal = getCapturedPieces('b').reduce((s, p) => s + (PIECE_VALUES[p.type] / 100), 0);
+    const bVal = getCapturedPieces('w').reduce((s, p) => s + (PIECE_VALUES[p.type] / 100), 0);
+    const diff = wVal - bVal;
     if (diff > 0) return { text: `+${diff}`, side: 'w' };
     if (diff < 0) return { text: `+${Math.abs(diff)}`, side: 'b' };
     return null;
   };
 
-  const matDiff = getMaterialAdvantage();
-
-  // 4. Build Board Grid Coordinates
-  const files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
-  const ranks = ['8', '7', '6', '5', '4', '3', '2', '1'];
-
-  const orderedFiles = boardFlipped ? [...files].reverse() : files;
-  const orderedRanks = boardFlipped ? [...ranks].reverse() : ranks;
-
-  // Calculate percentage for evaluation bar
-  // Score is centipawns. +500 means White up 5 pawns. -500 means Black up 5 pawns.
-  // We cap visual bar at +10 and -10.
+  // ── Eval bar ──────────────────────────────────────────────────────────────
   const getEvalPercentage = () => {
-    if (game.isGameOver() && checkCheckmate(game)) {
-      return turn === 'w' ? 0 : 100; // 0% white fill on black win, 100% white fill on white win
-    }
-    const cap = 1000; // 10 pawns
+    if (game.isGameOver() && isCheckmate(game)) return turn === 'w' ? 0 : 100;
+    const cap   = 1000;
     const score = Math.max(-cap, Math.min(cap, evaluation));
-    
-    // percentage of white advantage
     return 50 + (score / (cap * 2)) * 100;
   };
 
+  // ── Auth handlers ─────────────────────────────────────────────────────────
+  const handleAuthSubmit = async (e) => {
+    e.preventDefault();
+    setAuthError('');
+    setAuthLoading(true);
+    try {
+      let user;
+      if (authModal === 'login') {
+        user = await apiLogin(authForm.loginId, authForm.password);
+      } else {
+        user = await apiRegister(authForm.username, authForm.email, authForm.password);
+      }
+      setCurrentUser(user);
+      setAuthModal(null);
+      setAuthForm({ username:'', email:'', loginId:'', password:'' });
+    } catch (err) {
+      setAuthError(err.message || 'Authentication failed');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    await apiLogout();
+    setCurrentUser(null);
+  };
+
+  const handleShowLeaderboard = async () => {
+    if (!showLeaderboard) {
+      try {
+        const data = await apiGetLeaderboard();
+        setLeaderboard(data.leaderboard || []);
+      } catch { setLeaderboard([]); }
+    }
+    setShowLeaderboard(!showLeaderboard);
+  };
+
+  // ── Board layout ──────────────────────────────────────────────────────────
+  const files = ['a','b','c','d','e','f','g','h'];
+  const ranks = ['8','7','6','5','4','3','2','1'];
+  const orderedFiles = boardFlipped ? [...files].reverse() : files;
+  const orderedRanks = boardFlipped ? [...ranks].reverse() : ranks;
+
   const evalPercent = getEvalPercentage();
-  const evaluationScoreText = (evaluation / 100).toFixed(1);
+  const evalText    = (evaluation / 100).toFixed(1);
+  const matDiff     = getMaterialAdvantage();
+  const botInfo     = BOTS[selectedBot];
 
   return (
     <div className={`app-container theme-${theme}`}>
-      
-      {/* Header bar */}
+
+      {/* ── Header ── */}
       <header className="app-header">
         <div className="logo-section">
-          <svg width="32" height="32" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <svg width="32" height="32" viewBox="0 0 100 100" fill="none">
             <rect width="100" height="100" rx="16" fill="var(--bg-secondary)"/>
             <path d="M50 20L30 50H70L50 20Z" fill="var(--accent-color)"/>
             <rect x="35" y="55" width="30" height="10" rx="3" fill="var(--text-main)"/>
@@ -640,22 +560,11 @@ function App() {
         </div>
 
         <div className="header-controls">
-          <select 
-            className="control-select" 
-            value={timeControl} 
-            onChange={(e) => setTimeControl(e.target.value)}
-            disabled={history.length > 0}
-          >
-            {Object.keys(TIME_CONTROLS).map(tc => (
-              <option key={tc} value={tc}>{TIME_CONTROLS[tc].name}</option>
-            ))}
+          <select className="control-select" value={timeControl} onChange={e => setTimeControl(e.target.value)} disabled={history.length > 0}>
+            {Object.entries(TIME_CONTROLS).map(([k,v]) => <option key={k} value={k}>{v.name}</option>)}
           </select>
 
-          <select 
-            className="control-select" 
-            value={theme} 
-            onChange={(e) => setTheme(e.target.value)}
-          >
+          <select className="control-select" value={theme} onChange={e => setTheme(e.target.value)}>
             <option value="neo-green">Neo-Green</option>
             <option value="wood">Classic Wood</option>
             <option value="midnight">Midnight Blue</option>
@@ -663,342 +572,252 @@ function App() {
             <option value="glass">Glassmorphism</option>
           </select>
 
-          <button 
-            className="icon-btn" 
-            onClick={() => setSoundOn(!soundOn)}
-            title={soundOn ? "Mute sounds" : "Unmute sounds"}
-          >
+          <button className="icon-btn" onClick={() => setSoundOn(!soundOn)} title={soundOn ? 'Mute' : 'Unmute'}>
             {soundOn ? '🔊' : '🔇'}
           </button>
+
+          {/* Auth button */}
+          {currentUser ? (
+            <div style={{ display:'flex', alignItems:'center', gap:'8px' }}>
+              <span style={{ fontSize:'0.8rem', color:'var(--accent-color)', fontWeight:600 }}>
+                ♟ {currentUser.username} ({currentUser.rating})
+              </span>
+              <button className="secondary-btn" style={{ padding:'4px 10px', fontSize:'0.75rem' }} onClick={handleLogout}>Logout</button>
+            </div>
+          ) : (
+            <div style={{ display:'flex', gap:'6px' }}>
+              <button className="secondary-btn" style={{ padding:'4px 10px', fontSize:'0.75rem' }} onClick={() => { setAuthModal('login'); setAuthError(''); }}>Login</button>
+              <button className="primary-btn" style={{ padding:'4px 10px', fontSize:'0.75rem' }} onClick={() => { setAuthModal('register'); setAuthError(''); }}>Sign Up</button>
+            </div>
+          )}
         </div>
       </header>
 
-      {/* Main Grid Layout */}
+      {/* ── Main Layout ── */}
       <main className="game-layout">
-        
-        {/* Left board section */}
+
+        {/* ── Left: Board Column ── */}
         <div className="board-column">
-          
-          {/* Opponent Bot Panel */}
+
+          {/* Opponent panel (bot — always top) */}
           <div className="player-panel">
             <div className="player-info">
-              <img 
-                src={BOTS[selectedBot].avatar} 
-                alt={BOTS[selectedBot].name} 
-                className="player-avatar"
-              />
+              <img src={botInfo.avatar} alt={botInfo.name} className="player-avatar"/>
               <div className="player-details">
-                <span className="player-name">{BOTS[selectedBot].name}</span>
-                <span className="player-rating">Bot • ELO {BOTS[selectedBot].elo}</span>
+                <span className="player-name">{botInfo.name}</span>
+                <span className="player-rating">Bot • ELO {botInfo.elo}</span>
                 <div className="captured-list">
-                  {getCapturedPieces('w').map((p, idx) => (
-                    <img 
-                      key={idx} 
-                      src={getPieceImg(p.color, p.type)} 
-                      className="captured-icon"
-                      alt=""
-                    />
+                  {getCapturedPieces(playerColor === 'w' ? 'w' : 'b').map((p,i) => (
+                    <img key={i} src={getPieceImg(p.color, p.type)} className="captured-icon" alt=""/>
                   ))}
-                  {matDiff && matDiff.side === 'b' && (
-                    <span className="material-diff">{matDiff.text}</span>
-                  )}
+                  {matDiff && matDiff.side === botColor && <span className="material-diff">{matDiff.text}</span>}
                 </div>
               </div>
             </div>
-            <div className={`player-timer ${turn === 'b' && historyIndex === -1 ? 'active-timer' : ''} ${blackTime < 30 ? 'low-time' : ''}`}>
-              {formatTime(blackTime)}
+            <div className={`player-timer ${turn === botColor && historyIndex === -1 ? 'active-timer' : ''} ${(botColor==='w'?whiteTime:blackTime) < 30 ? 'low-time' : ''}`}>
+              {formatTime(botColor === 'w' ? whiteTime : blackTime)}
             </div>
           </div>
 
-          {/* Chessboard & Eval Bar Container */}
+          {/* Board + Eval Bar */}
           <div className="board-container-wrapper">
-            
-            {/* Visual Advantage Evaluation Bar */}
             <div className="evaluation-bar-container">
-              {/* White Advantage portion (filled from bottom) */}
-              <div 
-                className="evaluation-bar-fill white-fill" 
-                style={{ height: `${evalPercent}%` }}
-              >
-                {evalPercent >= 15 && (
-                  <span className="evaluation-text white-text">
-                    {evaluationScoreText > 0 ? `+${evaluationScoreText}` : evaluationScoreText}
-                  </span>
-                )}
+              <div className="evaluation-bar-fill white-fill" style={{ height:`${evalPercent}%` }}>
+                {evalPercent >= 15 && <span className="evaluation-text white-text">{Number(evalText) > 0 ? `+${evalText}` : evalText}</span>}
               </div>
-              {/* Black Advantage portion (remainder) */}
-              <div 
-                className="evaluation-bar-fill black-fill" 
-                style={{ height: `${100 - evalPercent}%` }}
-              >
-                {evalPercent <= 85 && (
-                  <span className="evaluation-text black-text">
-                    {evaluationScoreText < 0 ? evaluationScoreText : `+${evaluationScoreText}`}
-                  </span>
-                )}
+              <div className="evaluation-bar-fill black-fill" style={{ height:`${100-evalPercent}%` }}>
+                {evalPercent <= 85 && <span className="evaluation-text black-text">{Number(evalText) < 0 ? evalText : `+${evalText}`}</span>}
               </div>
             </div>
 
-            {/* Chessboard grid */}
             <div className="chessboard-wrapper">
               <div className="board-grid">
-                {orderedRanks.map((rank) =>
-                  orderedFiles.map((file) => {
-                    const square = `${file}${rank}`;
-                    const fileIdx = file.charCodeAt(0) - 97;
-                    const rankIdx = 8 - parseInt(rank);
-                    const piece = board[rankIdx][fileIdx];
-                    const isDark = (fileIdx + rankIdx) % 2 === 1;
-                    
-                    const isSelected = selectedSquare === square;
-                    const isLegal = legalMoves.includes(square);
-                    const isLastMove = lastMove && (lastMove.from === square || lastMove.to === square);
-                    const isCheck = checkSquare === square;
+                {orderedRanks.map(rank => orderedFiles.map(file => {
+                  const square  = `${file}${rank}`;
+                  const fi      = file.charCodeAt(0) - 97;
+                  const ri      = 8 - parseInt(rank);
+                  const piece   = board[ri][fi];
+                  const isDark  = (fi + ri) % 2 === 1;
+                  const isSel   = selectedSquare === square;
+                  const isLegal = legalMoves.includes(square);
+                  const isLast  = lastMove && (lastMove.from === square || lastMove.to === square);
+                  const isChk   = checkSquare === square;
 
-                    let squareClass = `board-square ${isDark ? 'square-dark-color' : 'square-light-color'}`;
-                    if (isSelected) squareClass += ' square-selected-highlight';
-                    else if (isLastMove) squareClass += ' square-last-move-highlight';
-                    if (isCheck) squareClass += ' square-check-glow';
+                  let cls = `board-square ${isDark ? 'square-dark-color' : 'square-light-color'}`;
+                  if (isSel)       cls += ' square-selected-highlight';
+                  else if (isLast) cls += ' square-last-move-highlight';
+                  if (isChk)       cls += ' square-check-glow';
 
-                    // Coordinates details
-                    const showRankLabel = boardFlipped ? file === 'h' : file === 'a';
-                    const showFileLabel = boardFlipped ? rank === '8' : rank === '1';
+                  const showRank = boardFlipped ? file === 'h' : file === 'a';
+                  const showFile = boardFlipped ? rank === '8' : rank === '1';
 
-                    return (
-                      <div 
-                        key={square} 
-                        className={squareClass}
-                        onClick={() => handleSquareClick(square)}
-                        onDragOver={handleDragOver}
-                        onDrop={(e) => handleDrop(e, square)}
-                      >
-                        {/* Display piece if present */}
-                        {piece && (
-                          <div 
-                            className={`chess-piece ${selectedSquare === square ? 'dragging' : ''}`}
-                            style={{ backgroundImage: `url(${getPieceImg(piece.color, piece.type)})` }}
-                            draggable
-                            onDragStart={(e) => handleDragStart(e, square)}
-                          />
-                        )}
-
-                        {/* Legal Move Indicators */}
-                        {isLegal && (
-                          <div className={piece ? "capture-indicator" : "move-indicator"} />
-                        )}
-
-                        {/* Coordinates labels */}
-                        {showRankLabel && (
-                          <span className="square-coord coord-rank">{rank}</span>
-                        )}
-                        {showFileLabel && (
-                          <span className="square-coord coord-file">{file}</span>
-                        )}
-                      </div>
-                    );
-                  })
-                )}
+                  return (
+                    <div key={square} className={cls}
+                      onClick={() => handleSquareClick(square)}
+                      onDragOver={handleDragOver}
+                      onDrop={e => handleDrop(e, square)}
+                    >
+                      {piece && (
+                        <img
+                          className={`chess-piece ${selectedSquare === square ? 'dragging' : ''}`}
+                          src={getPieceImg(piece.color, piece.type)}
+                          alt={`${piece.color}${piece.type}`}
+                          draggable
+                          onDragStart={e => handleDragStart(e, square)}
+                        />
+                      )}
+                      {isLegal && <div className={piece ? 'capture-indicator' : 'move-indicator'}/>}
+                      {showRank && <span className="square-coord coord-rank">{rank}</span>}
+                      {showFile && <span className="square-coord coord-file">{file}</span>}
+                    </div>
+                  );
+                }))}
               </div>
 
-              {/* Promotion Choice Dialog Overlay */}
+              {/* Promotion dialog */}
               {pendingPromotion && (
                 <div className="promotion-overlay">
                   <div className="promotion-panel">
-                    {['q', 'r', 'b', 'n'].map((pType) => (
-                      <div 
-                        key={pType} 
-                        className="promotion-option"
-                        onClick={() => resolvePromotion(pType)}
-                      >
-                        <div 
-                          className="promotion-piece" 
-                          style={{ backgroundImage: `url(${getPieceImg('w', pType)})` }}
-                        />
+                    {['q','r','b','n'].map(p => (
+                      <div key={p} className="promotion-option" onClick={() => resolvePromotion(p)}>
+                        <div className="promotion-piece" style={{ backgroundImage:`url(${getPieceImg(playerColor, p)})` }}/>
                       </div>
                     ))}
                   </div>
                 </div>
               )}
 
-              {/* Game Over Modal popup */}
+              {/* Game over modal */}
               {gameOverModal && (
                 <div className="modal-overlay">
                   <div className="gameover-modal">
-                    <h2 className={`gameover-title ${gameOverModal.isWin === true ? 'win' : (gameOverModal.isWin === false ? 'loss' : 'draw')}`}>
+                    <h2 className={`gameover-title ${gameOverModal.isWin === true ? 'win' : gameOverModal.isWin === false ? 'loss' : 'draw'}`}>
                       {gameOverModal.title}
                     </h2>
                     <p className="gameover-reason">{gameOverModal.reason}</p>
-                    <button className="primary-btn" onClick={startNewGame}>
-                      Play Again
-                    </button>
+                    <button className="primary-btn" onClick={startNewGame}>Play Again</button>
                   </div>
                 </div>
               )}
-
             </div>
           </div>
 
-          {/* Player Info Panel */}
+          {/* Player panel (human — always bottom) */}
           <div className="player-panel">
             <div className="player-info">
-              <img 
-                src="https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?w=100&auto=format&fit=crop&q=60" 
-                alt="Player" 
+              <img
+                src={currentUser?.avatar || 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?w=100&auto=format&fit=crop&q=60'}
+                alt="Player"
                 className="player-avatar"
               />
               <div className="player-details">
-                <span className="player-name">Player (You)</span>
-                <span className="player-rating">Rating • 1500 ELO</span>
+                <span className="player-name">{currentUser ? currentUser.username : 'Player (You)'}</span>
+                <span className="player-rating">
+                  {currentUser
+                    ? `ELO ${currentUser.rating} • W${currentUser.wins}/L${currentUser.losses}/D${currentUser.draws}`
+                    : `Rating • Guest`}
+                </span>
                 <div className="captured-list">
-                  {getCapturedPieces('b').map((p, idx) => (
-                    <img 
-                      key={idx} 
-                      src={getPieceImg(p.color, p.type)} 
-                      className="captured-icon"
-                      alt=""
-                    />
+                  {getCapturedPieces(playerColor === 'w' ? 'b' : 'w').map((p,i) => (
+                    <img key={i} src={getPieceImg(p.color, p.type)} className="captured-icon" alt=""/>
                   ))}
-                  {matDiff && matDiff.side === 'w' && (
-                    <span className="material-diff">{matDiff.text}</span>
-                  )}
+                  {matDiff && matDiff.side === playerColor && <span className="material-diff">{matDiff.text}</span>}
                 </div>
               </div>
             </div>
-            <div className={`player-timer ${turn === 'w' && historyIndex === -1 ? 'active-timer' : ''} ${whiteTime < 30 ? 'low-time' : ''}`}>
-              {formatTime(whiteTime)}
+            <div className={`player-timer ${turn === playerColor && historyIndex === -1 ? 'active-timer' : ''} ${(playerColor==='w'?whiteTime:blackTime) < 30 ? 'low-time' : ''}`}>
+              {formatTime(playerColor === 'w' ? whiteTime : blackTime)}
             </div>
           </div>
-
         </div>
 
-        {/* Right Sidebar Section */}
+        {/* ── Right Sidebar ── */}
         <div className="sidebar-column">
-          
-          {/* Active Status Header */}
-          {botThinking && (
-            <div className="game-status-text bot-thinking">
-              Thinking... ELO calculation in progress
-            </div>
-          )}
+
+          {/* Status */}
+          {botThinking && <div className="game-status-text bot-thinking">🤖 {botInfo.name} is thinking...</div>}
           {game.inCheck() && !game.isGameOver() && (
-            <div className="game-status-text" style={{ color: 'var(--danger-color)', borderColor: 'var(--danger-color)' }}>
-              Check! Defend your King.
+            <div className="game-status-text" style={{ color:'var(--danger-color)', borderColor:'var(--danger-color)' }}>
+              ⚠️ Check! Defend your King.
             </div>
           )}
 
-          {/* Bot personality selection panel */}
+          {/* Bot selection */}
           <div className="sidebar-card">
-            <div className="card-header">
-              <span>Select Opponent Bot</span>
-            </div>
+            <div className="card-header"><span>Select Opponent</span></div>
             <div className="card-body">
               <div className="bots-grid">
-                {Object.keys(BOTS).map((botKey) => {
-                  const b = BOTS[botKey];
-                  return (
-                    <div 
-                      key={botKey} 
-                      className={`bot-card ${selectedBot === botKey ? 'selected-bot' : ''}`}
-                      onClick={() => {
-                        if (history.length === 0) setSelectedBot(botKey);
-                      }}
-                      style={{ opacity: history.length > 0 ? 0.6 : 1, cursor: history.length > 0 ? 'not-allowed' : 'pointer' }}
-                      title={history.length > 0 ? "Cannot change opponent mid-game" : `Play against ${b.name}`}
-                    >
-                      <img src={b.avatar} alt={b.name} className="bot-card-avatar" />
-                      <span className="bot-card-name">{b.name}</span>
-                      <span className="bot-card-elo">{b.elo} ELO</span>
-                    </div>
-                  );
-                })}
+                {Object.entries(BOTS).map(([key, b]) => (
+                  <div
+                    key={key}
+                    className={`bot-card ${selectedBot === key ? 'selected-bot' : ''}`}
+                    onClick={() => { if (history.length === 0) setSelectedBot(key); }}
+                    style={{ opacity: history.length > 0 ? 0.6 : 1, cursor: history.length > 0 ? 'not-allowed' : 'pointer' }}
+                    title={history.length > 0 ? 'Cannot change mid-game' : `Play vs ${b.name}`}
+                  >
+                    <img src={b.avatar} alt={b.name} className="bot-card-avatar"/>
+                    <span className="bot-card-name">{b.name}</span>
+                    <span className="bot-card-elo">{b.elo} ELO</span>
+                  </div>
+                ))}
+              </div>
+
+              {/* Play as color */}
+              <div style={{ marginTop:'10px', display:'flex', gap:'8px', alignItems:'center' }}>
+                <span style={{ fontSize:'0.78rem', color:'var(--text-muted)' }}>Play as:</span>
+                <button
+                  className={playerColor === 'w' ? 'primary-btn' : 'secondary-btn'}
+                  style={{ padding:'4px 12px', fontSize:'0.78rem' }}
+                  disabled={history.length > 0}
+                  onClick={() => setPlayerColor('w')}
+                >♔ White</button>
+                <button
+                  className={playerColor === 'b' ? 'primary-btn' : 'secondary-btn'}
+                  style={{ padding:'4px 12px', fontSize:'0.78rem' }}
+                  disabled={history.length > 0}
+                  onClick={() => setPlayerColor('b')}
+                >♚ Black</button>
               </div>
             </div>
           </div>
 
-          {/* Game controls and history panel */}
-          <div className="sidebar-card" style={{ flex: 1 }}>
+          {/* Controls & Move Log */}
+          <div className="sidebar-card" style={{ flex:1 }}>
             <div className="card-header">
               <span>Game Control</span>
               {historyIndex !== -1 && (
-                <button 
-                  className="secondary-btn" 
-                  style={{ padding: '3px 8px', fontSize: '0.75rem', backgroundColor: 'var(--accent-color)', color: '#fff' }}
-                  onClick={resumeLivePosition}
-                >
+                <button className="secondary-btn" style={{ padding:'3px 8px', fontSize:'0.75rem', backgroundColor:'var(--accent-color)', color:'#fff' }} onClick={resumeLivePosition}>
                   Resume Live
                 </button>
               )}
             </div>
-            <div className="card-body" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-              
-              {/* Controls Row */}
+            <div className="card-body" style={{ flex:1, display:'flex', flexDirection:'column' }}>
               <div className="controls-row">
-                <button className="primary-btn" onClick={startNewGame}>
-                  🔄 New Game
-                </button>
-                <button className="secondary-btn" onClick={handleFlipBoard} title="Flip Board Perspective">
-                  🔁 Flip Board
-                </button>
+                <button className="primary-btn" onClick={startNewGame}>🔄 New Game</button>
+                <button className="secondary-btn" onClick={() => setBoardFlipped(!boardFlipped)} title="Flip Board">🔁 Flip</button>
+              </div>
+              <div className="controls-row">
+                <button className="secondary-btn" onClick={handleUndo} disabled={history.length < 2 || historyIndex !== -1}>↩ Undo</button>
+                <button className="danger-btn" onClick={handleResign} disabled={!!game.isGameOver() || !!gameOverModal}>🏳 Resign</button>
               </div>
 
-              <div className="controls-row">
-                <button 
-                  className="secondary-btn" 
-                  onClick={handleUndo} 
-                  disabled={history.length < 2 || historyIndex !== -1}
-                  title="Undo last move pair"
-                >
-                  ↩ Undo Move
-                </button>
-                <button 
-                  className="danger-btn" 
-                  onClick={handleResign}
-                  disabled={game.isGameOver() || gameOverModal}
-                >
-                  🏳 Resign
-                </button>
-              </div>
-
-              {/* Move Log Table */}
-              <div style={{ fontWeight: 600, fontSize: '0.85rem', color: 'var(--text-muted)' }}>Move Log</div>
+              {/* Move Log */}
+              <div style={{ fontWeight:600, fontSize:'0.85rem', color:'var(--text-muted)', marginBottom:'4px' }}>Move Log</div>
               <div className="move-log-container">
                 <table className="move-log-table">
                   <tbody>
                     {Array.from({ length: Math.ceil(history.length / 2) }).map((_, i) => {
-                      const whiteMoveIdx = i * 2;
-                      const blackMoveIdx = i * 2 + 1;
-                      const whiteMove = history[whiteMoveIdx];
-                      const blackMove = history[blackMoveIdx];
-
-                      const whiteQuality = moveQualities[whiteMoveIdx]?.quality;
-                      const blackQuality = moveQualities[blackMoveIdx]?.quality;
-
+                      const wi = i * 2, bi = i * 2 + 1;
+                      const wm = history[wi], bm = history[bi];
+                      const wq = moveQualities[wi]?.quality, bq = moveQualities[bi]?.quality;
                       return (
                         <tr key={i} className="move-log-row">
-                          <td className="move-log-number">{i + 1}.</td>
-                          <td 
-                            className={`move-log-cell ${historyIndex === whiteMoveIdx ? 'active-history-move' : ''}`}
-                            onClick={() => viewHistoricalPosition(whiteMoveIdx)}
-                          >
-                            {whiteMove.san}
-                            {whiteQuality && (
-                              <span className={`move-badge badge-${whiteQuality}`}>
-                                {whiteQuality}
-                              </span>
-                            )}
+                          <td className="move-log-number">{i+1}.</td>
+                          <td className={`move-log-cell ${historyIndex === wi ? 'active-history-move' : ''}`} onClick={() => viewHistoricalPosition(wi)}>
+                            {wm.san}{wq && <span className={`move-badge badge-${wq}`}>{wq}</span>}
                           </td>
-                          <td 
-                            className={`move-log-cell ${historyIndex === blackMoveIdx ? 'active-history-move' : ''}`}
-                            onClick={() => {
-                              if (blackMove) viewHistoricalPosition(blackMoveIdx);
-                            }}
-                          >
-                            {blackMove ? blackMove.san : ''}
-                            {blackQuality && (
-                              <span className={`move-badge badge-${blackQuality}`}>
-                                {blackQuality}
-                              </span>
-                            )}
+                          <td className={`move-log-cell ${historyIndex === bi ? 'active-history-move' : ''}`} onClick={() => bm && viewHistoricalPosition(bi)}>
+                            {bm ? bm.san : ''}{bq && <span className={`move-badge badge-${bq}`}>{bq}</span>}
                           </td>
                         </tr>
                       );
@@ -1007,78 +826,112 @@ function App() {
                 </table>
               </div>
 
-              {/* Review triggers */}
+              {/* Review */}
               {game.isGameOver() && accuracyStats && (
-                <button 
-                  className="primary-btn" 
-                  style={{ backgroundColor: '#1baca6' }}
-                  onClick={() => setShowReview(!showReview)}
-                >
-                  {showReview ? 'Show Move Log' : '📊 Game Review / Accuracy'}
+                <button className="primary-btn" style={{ backgroundColor:'#1baca6', marginTop:'8px' }} onClick={() => setShowReview(!showReview)}>
+                  {showReview ? 'Show Move Log' : '📊 Game Review'}
                 </button>
               )}
-
-              {/* Game Review Stats display */}
               {showReview && accuracyStats && (
                 <div className="game-review-panel">
                   <div className="review-accuracy-container">
                     <div className="accuracy-circle">
-                      <div className="accuracy-value white-accuracy">
-                        {accuracyStats.whiteAccuracy}%
-                      </div>
-                      <span className="accuracy-label">Your Accuracy</span>
+                      <div className="accuracy-value white-accuracy">{accuracyStats.whiteAccuracy}%</div>
+                      <span className="accuracy-label">White Accuracy</span>
                     </div>
                     <div className="accuracy-circle">
-                      <div className="accuracy-value black-accuracy">
-                        {accuracyStats.blackAccuracy}%
-                      </div>
-                      <span className="accuracy-label">{BOTS[selectedBot].name} ELO</span>
+                      <div className="accuracy-value black-accuracy">{accuracyStats.blackAccuracy}%</div>
+                      <span className="accuracy-label">Black Accuracy</span>
                     </div>
                   </div>
-
                   <div className="review-stats-grid">
-                    <div className="stat-item">
-                      <span className="stat-label"><span className="stat-dot dot-brilliant"></span> Brilliant</span>
-                      <span className="stat-counts">{accuracyStats.counts.white.brilliant}</span>
-                    </div>
-                    <div className="stat-item">
-                      <span className="stat-label"><span className="stat-dot dot-best"></span> Best Move</span>
-                      <span className="stat-counts">{accuracyStats.counts.white.best}</span>
-                    </div>
-                    <div className="stat-item">
-                      <span className="stat-label"><span className="stat-dot dot-book"></span> Book Move</span>
-                      <span className="stat-counts">{accuracyStats.counts.white.book}</span>
-                    </div>
-                    <div className="stat-item">
-                      <span className="stat-label"><span className="stat-dot dot-good"></span> Good</span>
-                      <span className="stat-counts">{accuracyStats.counts.white.good}</span>
-                    </div>
-                    <div className="stat-item">
-                      <span className="stat-label"><span className="stat-dot dot-inaccuracy"></span> Inaccuracies</span>
-                      <span className="stat-counts">{accuracyStats.counts.white.inaccuracy}</span>
-                    </div>
-                    <div className="stat-item">
-                      <span className="stat-label"><span className="stat-dot dot-mistake"></span> Mistakes</span>
-                      <span className="stat-counts">{accuracyStats.counts.white.mistake}</span>
-                    </div>
-                    <div className="stat-item" style={{ gridColumn: 'span 2' }}>
-                      <span className="stat-label" style={{ color: 'var(--danger-color)' }}>
-                        <span className="stat-dot dot-blunder"></span> Blunders Committed
-                      </span>
-                      <span className="stat-counts" style={{ color: 'var(--danger-color)' }}>
-                        {accuracyStats.counts.white.blunder}
-                      </span>
-                    </div>
+                    {[['brilliant','Brilliant'],['best','Best Move'],['book','Book Move'],['good','Good'],['inaccuracy','Inaccuracy'],['mistake','Mistake'],['blunder','Blunder']].map(([k,label]) => (
+                      <div key={k} className="stat-item" style={k==='blunder'?{gridColumn:'span 2'}:{}}>
+                        <span className="stat-label"><span className={`stat-dot dot-${k}`}></span> {label}</span>
+                        <span className="stat-counts" style={k==='blunder'?{color:'var(--danger-color)'}:{}}>{accuracyStats.counts.white[k]??0}</span>
+                      </div>
+                    ))}
                   </div>
                 </div>
               )}
-
             </div>
           </div>
 
-        </div>
+          {/* Leaderboard (backend) */}
+          <div className="sidebar-card">
+            <div className="card-header">
+              <span>🏆 Leaderboard</span>
+              <button className="secondary-btn" style={{ padding:'3px 8px', fontSize:'0.75rem' }} onClick={handleShowLeaderboard}>
+                {showLeaderboard ? 'Hide' : 'Show'}
+              </button>
+            </div>
+            {showLeaderboard && (
+              <div className="card-body">
+                {leaderboard.length === 0
+                  ? <p style={{ fontSize:'0.78rem', color:'var(--text-muted)' }}>Backend offline or no players yet.</p>
+                  : leaderboard.slice(0, 10).map((p, i) => (
+                    <div key={p.id} style={{ display:'flex', justifyContent:'space-between', fontSize:'0.8rem', padding:'3px 0', borderBottom:'1px solid var(--border-color)' }}>
+                      <span>{i+1}. {p.username}</span>
+                      <span style={{ color:'var(--accent-color)', fontWeight:600 }}>{p.rating}</span>
+                    </div>
+                  ))
+                }
+              </div>
+            )}
+          </div>
 
+        </div>
       </main>
+
+      {/* ── Auth Modal ── */}
+      {authModal && (
+        <div className="modal-overlay" onClick={() => setAuthModal(null)}>
+          <div className="gameover-modal" style={{ maxWidth:'340px' }} onClick={e => e.stopPropagation()}>
+            <h2 className="gameover-title" style={{ fontSize:'1.3rem' }}>
+              {authModal === 'login' ? '🔐 Login' : '📝 Create Account'}
+            </h2>
+            <form onSubmit={handleAuthSubmit} style={{ display:'flex', flexDirection:'column', gap:'10px', marginTop:'12px' }}>
+              {authModal === 'register' && (
+                <input
+                  className="control-select" style={{ width:'100%', padding:'8px', boxSizing:'border-box' }}
+                  type="text" placeholder="Username" required minLength={3}
+                  value={authForm.username}
+                  onChange={e => setAuthForm({ ...authForm, username: e.target.value })}
+                />
+              )}
+              {authModal === 'register' && (
+                <input
+                  className="control-select" style={{ width:'100%', padding:'8px', boxSizing:'border-box' }}
+                  type="email" placeholder="Email" required
+                  value={authForm.email}
+                  onChange={e => setAuthForm({ ...authForm, email: e.target.value })}
+                />
+              )}
+              {authModal === 'login' && (
+                <input
+                  className="control-select" style={{ width:'100%', padding:'8px', boxSizing:'border-box' }}
+                  type="text" placeholder="Email or Username" required
+                  value={authForm.loginId}
+                  onChange={e => setAuthForm({ ...authForm, loginId: e.target.value })}
+                />
+              )}
+              <input
+                className="control-select" style={{ width:'100%', padding:'8px', boxSizing:'border-box' }}
+                type="password" placeholder="Password" required minLength={8}
+                value={authForm.password}
+                onChange={e => setAuthForm({ ...authForm, password: e.target.value })}
+              />
+              {authError && <p style={{ color:'var(--danger-color)', fontSize:'0.8rem', margin:0 }}>{authError}</p>}
+              <button className="primary-btn" type="submit" disabled={authLoading}>
+                {authLoading ? 'Please wait...' : authModal === 'login' ? 'Login' : 'Create Account'}
+              </button>
+              <button type="button" className="secondary-btn" onClick={() => setAuthModal(authModal === 'login' ? 'register' : 'login')}>
+                {authModal === 'login' ? "Don't have an account? Sign Up" : 'Already have an account? Login'}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
