@@ -27,7 +27,16 @@ export const validate = (schema: ZodSchema, target: ValidationTarget = "body") =
     }
 
     // Replace the target with the parsed (type-coerced, stripped) value
-    req[target] = result.data;
+    if (target === "body") {
+      req.body = result.data;
+    } else {
+      Object.defineProperty(req, target, {
+        value: result.data,
+        writable: true,
+        configurable: true,
+        enumerable: true,
+      });
+    }
     next();
   };
 };
