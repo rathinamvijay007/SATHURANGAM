@@ -4,7 +4,7 @@ import confetti from 'canvas-confetti';
 import { soundManager } from './soundManager';
 import { getBestMove, evaluateBoard, clearTranspositionTable, PIECE_VALUES } from './chessEngine';
 import { getPieceImg } from './chessPieces';
-import { apiLogin, apiRegister, apiLogout, apiGetMe, apiGetLeaderboard, clearTokens, getToken } from './api';
+import { apiLogin, apiRegister, apiLogout, apiGetMe, apiGetLeaderboard, clearTokens, getToken, apiCheckHealth } from './api';
 import './App.css';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -89,7 +89,7 @@ function App() {
         .catch(() => { clearTokens(); });
     } else {
       // Ping backend to check if it is available
-      fetch('http://localhost:5000/health').then(() => { backendOnline.current = true; }).catch(() => {});
+      apiCheckHealth().then(ok => { if (ok) backendOnline.current = true; }).catch(() => {});
     }
   }, []);
 

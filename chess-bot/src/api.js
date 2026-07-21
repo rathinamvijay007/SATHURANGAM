@@ -91,3 +91,8 @@ export async function apiGetUserStats(userId) {
   const data = await apiFetch(`/api/users/${userId}/stats`);
   return data.data;
 }
+
+export async function apiCheckHealth() {
+  const res = await fetch(`${BASE_URL}/health`);
+  return res.ok;
+}
